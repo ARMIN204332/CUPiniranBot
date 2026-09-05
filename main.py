@@ -162,8 +162,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # پروفایل
     elif query.data == "profile":
 
+        # فقط دعوت‌هایی که عضویتشان تأیید شده
         cur.execute(
-            "SELECT COUNT(*) FROM users WHERE invited_by=?",
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE invited_by=? AND joined=1
+            """,
             (user_id,)
         )
 
@@ -184,7 +189,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👤 اطلاعات حساب\n\n"
             f"🆔 شناسه: {user_id}\n"
             f"📢 وضعیت عضویت: {status}\n"
-            f"👥 تعداد دعوت‌ها: {referrals}",
+            f"👥 تعداد دعوت‌های تأییدشده: {referrals}",
             reply_markup=menu()
         )
 
@@ -199,8 +204,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"?start={user_id}"
         )
 
+        # فقط کسانی که واقعاً عضو کانال شده‌اند
         cur.execute(
-            "SELECT COUNT(*) FROM users WHERE invited_by=?",
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE invited_by=? AND joined=1
+            """,
             (user_id,)
         )
 
@@ -208,10 +218,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             "👥 دعوت دوستان\n\n"
-            f"تعداد دعوت‌های شما: {count}\n\n"
+            f"تعداد دعوت‌های تأییدشده: {count}\n\n"
             "🔗 لینک اختصاصی شما:\n"
             f"{link}\n\n"
-            "این لینک را برای دوستانت بفرست.",
+            "این لینک را برای دوستانت بفرست.\n"
+            "فقط افرادی که عضو کانال شوند و عضویتشان تأیید شود، "
+            "به عنوان دعوت موفق حساب می‌شوند.",
             reply_markup=menu()
         )
 
@@ -235,7 +247,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 کل کاربران: {total}\n"
         f"✅ اعضای تأییدشده: {joined}\n\n"
         "دستورهای مدیریت:\n"
-        "/stats - آمار کامل\n"
+        "/stats - آمار کامل و دعوت‌ها\n"
         "/broadcast - ارسال پیام همگانی"
     )
 
@@ -259,12 +271,55 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     not_joined = cur.fetchone()[0]
 
-    await update.message.reply_text(
+    # رتبه‌بندی دعوت‌کننده‌ها
+    # فقط کاربرانی که دعوت شده‌اند و عضویتشان تأیید شده
+    cur.execute("""
+        SELECT
+            u.id,
+            u.username,
+            u.first_name,
+            COUNT(r.id) AS referrals
+        FROM users u
+        LEFT JOIN users r
+            ON r.invited_by = u.id
+            AND r.joined = 1
+        GROUP BY u.id
+        HAVING referrals > 0
+        ORDER BY referrals DESC
+        LIMIT 20
+    """)
+
+    referrers = cur.fetchall()
+
+    text = (
         "📊 آمار ربات\n\n"
         f"👥 کل کاربران: {total}\n"
         f"✅ عضو تأییدشده: {joined}\n"
-        f"❌ تأییدنشده: {not_joined}"
+        f"❌ تأییدنشده: {not_joined}\n\n"
+        "🏆 برترین دعوت‌کننده‌ها:\n\n"
     )
+
+    if not referrers:
+
+        text += "هنوز دعوت تأییدشده‌ای ثبت نشده."
+
+    else:
+
+        for i, row in enumerate(referrers, start=1):
+
+            user_id, username, first_name, referrals = row
+
+            if username:
+                name = f"@{username}"
+            else:
+                name = first_name or str(user_id)
+
+            text += (
+                f"{i}. {name}\n"
+                f"   👥 دعوت موفق: {referrals} نفر\n"
+            )
+
+    await update.message.reply_text(text)
 
 
 # ارسال پیام همگانی
@@ -274,10 +329,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
+
         await update.message.reply_text(
             "نحوه استفاده:\n"
             "/broadcast متن پیام"
         )
+
         return
 
     message = " ".join(context.args)
@@ -302,6 +359,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success += 1
 
         except Exception:
+
             failed += 1
 
     await update.message.reply_text(
