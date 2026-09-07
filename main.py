@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS users (
 db.commit()
 
 
+# =====================================
+# ثبت / به‌روزرسانی کاربر
+# =====================================
+
 def add_user(user_id, username, first_name, invited_by=None):
 
     cur.execute(
@@ -75,6 +79,10 @@ def add_user(user_id, username, first_name, invited_by=None):
     db.commit()
 
 
+# =====================================
+# منوی اصلی
+# =====================================
+
 def menu():
 
     return InlineKeyboardMarkup([
@@ -105,6 +113,10 @@ def menu():
     ])
 
 
+# =====================================
+# بررسی عضویت کانال
+# =====================================
+
 async def check_membership(user_id, context):
 
     try:
@@ -129,11 +141,19 @@ async def check_membership(user_id, context):
         return False
 
 
+# =====================================
+# استارت
+# =====================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
     invited_by = None
+
+    # ---------------------------------
+    # بررسی لینک دعوت
+    # ---------------------------------
 
     if context.args:
 
@@ -159,12 +179,109 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             pass
 
+    # ---------------------------------
+    # بررسی اینکه کاربر قبلاً وجود داشته
+    # ---------------------------------
+
+    cur.execute(
+        "SELECT id FROM users WHERE id=?",
+        (user.id,)
+    )
+
+    existing_user = cur.fetchone()
+
+    is_first_start = existing_user is None
+
+    # ---------------------------------
+    # ثبت کاربر
+    # ---------------------------------
+
     add_user(
         user.id,
         user.username,
         user.first_name,
         invited_by
     )
+
+    # ---------------------------------
+    # اطلاع به ادمین فقط اولین استارت
+    # ---------------------------------
+
+    if is_first_start:
+
+        username_text = (
+            f"@{user.username}"
+            if user.username
+            else "ندارد"
+        )
+
+        first_name_text = (
+            user.first_name
+            if user.first_name
+            else "نامشخص"
+        )
+
+        if invited_by:
+
+            cur.execute(
+                """
+                SELECT username, first_name
+                FROM users
+                WHERE id=?
+                """,
+                (invited_by,)
+            )
+
+            inviter = cur.fetchone()
+
+            if inviter:
+
+                inviter_username = inviter[0]
+                inviter_first_name = inviter[1]
+
+                if inviter_username:
+
+                    inviter_text = f"@{inviter_username}"
+
+                else:
+
+                    inviter_text = (
+                        inviter_first_name
+                        or str(invited_by)
+                    )
+
+            else:
+
+                inviter_text = str(invited_by)
+
+        else:
+
+            inviter_text = "مستقیم / بدون لینک دعوت"
+
+        admin_text = (
+            "🆕 کاربر جدید ربات را استارت کرد\n\n"
+            f"👤 نام: {first_name_text}\n"
+            f"🔹 Username: {username_text}\n"
+            f"🆔 ID: {user.id}\n"
+            f"👥 دعوت‌کننده: {inviter_text}"
+        )
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=admin_text
+            )
+
+        except Exception as e:
+
+            logging.warning(
+                f"Failed to notify admin: {e}"
+            )
+
+    # ---------------------------------
+    # پیام خوش‌آمدگویی
+    # ---------------------------------
 
     await update.message.reply_text(
         f"سلام {user.first_name} 👋\n\n"
@@ -174,6 +291,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=menu()
     )
 
+
+# =====================================
+# دکمه‌ها
+# =====================================
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
