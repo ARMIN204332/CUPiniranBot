@@ -1,3 +1,4 @@
+```python
 import os
 import sqlite3
 import logging
@@ -163,7 +164,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if ref_id != user.id:
 
-                # بررسی کنیم دعوت‌کننده واقعاً در دیتابیس هست
                 cur.execute(
                     "SELECT id FROM users WHERE id=?",
                     (ref_id,)
@@ -180,7 +180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # ---------------------------------
-    # بررسی اینکه کاربر قبلاً وجود داشته
+    # بررسی اولین استارت
     # ---------------------------------
 
     cur.execute(
@@ -284,10 +284,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------------------------------
 
     await update.message.reply_text(
-        f"سلام {user.first_name} 👋\n\n"
-        "به ربات خوش اومدی.\n\n"
-        "برای استفاده از امکانات، ابتدا عضو کانال شو "
-        "و سپس روی «بررسی عضویت» بزن.",
+        "سلام، خوش اومدی 👋\n\n"
+        "با عضو شدن در کانال یک امتیاز به دست میاری 🎁\n"
+        "و با هر دعوت موفق ۲ امتیاز! 👥\n\n"
+        "جوایز ما رو از دست نده 😍\n\n"
+        "💓💥💥",
         reply_markup=menu()
     )
 
@@ -638,7 +639,6 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   👤 دعوت‌کننده: {inviter_name}\n\n"
         )
 
-        # جلوگیری از پیام بیش از حد بزرگ تلگرام
         if len(text) > 3500:
 
             await update.message.reply_text(text)
@@ -764,3 +764,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
