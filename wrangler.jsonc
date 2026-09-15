@@ -3,23 +3,20 @@
   "name": "cupiniran-games",
   "main": "main.js",
   "compatibility_date": "2026-09-15",
-  "migrations": [
-    {
-      "new_sqlite_classes": [
-        "GameRoom"
-      ],
-      "tag": "v1"
-    }
-  ],
+
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "GameRoom",
-        "name": "GAME_ROOMS"
+        "name": "GAME_ROOMS",
+        "class_name": "GameRoom"
       }
     ]
   },
-  "observability": {
-    "enabled": true
+
+  "exports": {
+    "GameRoom": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
   }
 }
