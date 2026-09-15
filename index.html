@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <title>CUPiniran Games</title>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, Tahoma, sans-serif;
+            background: var(--tg-theme-bg-color, #111827);
+            color: var(--tg-theme-text-color, #ffffff);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 520px;
+            margin: auto;
+            padding: 18px;
+        }
+
+        .header {
+            text-align: center;
+            padding: 15px 0 20px;
+        }
+
+        .logo {
+            font-size: 42px;
+        }
+
+        h1 {
+            margin: 8px 0 5px;
+            font-size: 25px;
+        }
+
+        .subtitle {
+            opacity: .7;
+            font-size: 14px;
+        }
+
+        .menu {
+            display: grid;
+            gap: 12px;
+        }
+
+        button {
+            border: 0;
+            border-radius: 16px;
+            padding: 17px;
+            font-size: 17px;
+            font-weight: bold;
+            cursor: pointer;
+            background: var(--tg-theme-secondary-bg-color, #1f2937);
+            color: var(--tg-theme-text-color, #fff);
+        }
+
+        button:active {
+            transform: scale(.97);
+        }
+
+        .game-btn {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .game-icon {
+            font-size: 28px;
+        }
+
+        .screen {
+            display: none;
+        }
+
+        .screen.active {
+            display: block;
+        }
+
+        .back {
+            margin-bottom: 15px;
+            width: 100%;
+        }
+
+        .card {
+            background: var(--tg-theme-secondary-bg-color, #1f2937);
+            border-radius: 20px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .board {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            max-width: 330px;
+            margin: 20px auto;
+        }
+
+        .cell {
+            aspect-ratio: 1;
+            font-size: 42px;
+            padding: 0;
+        }
+
+        .result {
+            min-height: 30px;
+            margin: 15px 0;
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .choices {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-top: 20px;
+        }
+
+        .choice {
+            font-size: 38px;
+            padding: 15px 5px;
+        }
+
+        .playing-card {
+            width: 150px;
+            height: 210px;
+            margin: 25px auto;
+            border-radius: 18px;
+            background: white;
+            color: black;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 65px;
+            box-shadow: 0 8px 25px rgba(0,0,0,.3);
+        }
+
+        .small {
+            opacity: .65;
+            font-size: 13px;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <!-- HOME -->
+    <section id="home" class="screen active">
+
+        <div class="header">
+            <div class="logo">🎮</div>
+            <h1>CUPiniran</h1>
+            <div class="subtitle">مینی‌گیم‌ها</div>
+        </div>
+
+        <div class="menu">
+
+            <button class="game-btn" onclick="openGame('tictactoe')">
+                <span>⭕❌ دوز</span>
+                <span class="game-icon">🎮</span>
+            </button>
+
+            <button class="game-btn" onclick="openGame('rps')">
+                <span>✊📄✂️ سنگ کاغذ قیچی</span>
+                <span class="game-icon">⚡</span>
+            </button>
+
+            <button class="game-btn" onclick="openGame('cards')">
+                <span>🃏 بازی کارت</span>
+                <span class="game-icon">🃏</span>
+            </button>
+
+        </div>
+
+        <p class="small" style="text-align:center;margin-top:25px;">
+            بازی‌ها تفریحی هستند و امتیازها فقط در همین صفحه نگهداری می‌شوند.
+        </p>
+
+    </section>
+
+
+    <!-- TIC TAC TOE -->
+    <section id="tictactoe" class="screen">
+
+        <button class="back" onclick="goHome()">⬅️ برگشت</button>
+
+        <div class="card">
+
+            <h2>⭕❌ دوز</h2>
+
+            <p>
+                شما: ❌
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                ربات: ⭕
+            </p>
+
+            <div id="ttt-board" class="board"></div>
+
+            <div id="ttt-result" class="result">
+                نوبت شماست 👆
+            </div>
+
+            <button onclick="resetTicTacToe()">
+                🔄 بازی دوباره
+            </button>
+
+        </div>
+
+    </section>
+
+
+    <!-- ROCK PAPER SCISSORS -->
+    <section id="rps" class="screen">
+
+        <button class="back" onclick="goHome()">⬅️ برگشت</button>
+
+        <div class="card">
+
+            <h2>✊📄✂️ سنگ کاغذ قیچی</h2>
+
+            <p>یکی رو انتخاب کن:</p>
+
+            <div class="choices">
+
+                <button class="choice" onclick="playRPS('rock')">
+                    ✊
+                </button>
+
+                <button class="choice" onclick="playRPS('paper')">
+                    📄
+                </button>
+
+                <button class="choice" onclick="playRPS('scissors')">
+                    ✂️
+                </button>
+
+            </div>
+
+            <div id="rps-result" class="result">
+                آماده‌ای؟ 😎
+            </div>
+
+            <button onclick="resetRPS()">
+                🔄 دوباره
+            </button>
+
+        </div>
+
+    </section>
+
+
+    <!-- CARD GAME -->
+    <section id="cards" class="screen">
+
+        <button class="back" onclick="goHome()">⬅️ برگشت</button>
+
+        <div class="card">
+
+            <h2>🃏 بازی کارت</h2>
+
+            <p>
+                یک کارت تصادفی بکش!
+            </p>
+
+            <div id="playing-card" class="playing-card">
+                🂠
+            </div>
+
+            <div id="card-result" class="result">
+                کارتت رو بکش 👇
+            </div>
+
+            <button onclick="drawCard()">
+                🃏 کشیدن کارت
+            </button>
+
+        </div>
+
+        <p class="small" style="text-align:center;margin-top:15px;">
+            این بازی صرفاً تفریحی است و شامل شرط‌بندی یا پول واقعی نیست.
+        </p>
+
+    </section>
+
+</div>
+
+
+<script>
+
+    // Telegram Web App
+    const tg = window.Telegram && window.Telegram.WebApp;
+
+    if (tg) {
+        tg.ready();
+        tg.expand();
+    }
+
+
+    // =========================
+    // NAVIGATION
+    // =========================
+
+    function openGame(game) {
+
+        document.querySelectorAll('.screen')
+            .forEach(x => x.classList.remove('active'));
+
+        document.getElementById(game)
+            .classList.add('active');
+
+        if (game === 'tictactoe') {
+            resetTicTacToe();
+        }
+
+        if (game === 'rps') {
+            resetRPS();
+        }
+
+    }
+
+
+    function goHome() {
+
+        document.querySelectorAll('.screen')
+            .forEach(x => x.classList.remove('active'));
+
+        document.getElementById('home')
+            .classList.add('active');
+
+    }
+
+
+    // =========================
+    // TIC TAC TOE
+    // =========================
+
+    let board = [];
+    let gameOver = false;
+
+    function resetTicTacToe() {
+
+        board = [
+            '', '', '',
+            '', '', '',
+            '', '', ''
+        ];
+
+        gameOver = false;
+
+        document.getElementById('ttt-result').textContent =
+            'نوبت شماست 👆';
+
+        renderBoard();
+
+    }
+
+
+    function renderBoard() {
+
+        const boardElement =
+            document.getElementById('ttt-board');
+
+        boardElement.innerHTML = '';
+
+        board.forEach((value, index) => {
+
+            const button =
+                document.createElement('button');
+
+            button.className = 'cell';
+
+            button.textContent = value;
+
+            button.onclick = () =>
+                playerMove(index);
+
+            boardElement.appendChild(button);
+
+        });
+
+    }
+
+
+    function playerMove(index) {
+
+        if (gameOver || board[index] !== '') {
+            return;
+        }
+
+        board[index] = '❌';
+
+        renderBoard();
+
+        const result = checkWinner();
+
+        if (result) {
+            finishTicTacToe(result);
+            return;
+        }
+
+        document.getElementById('ttt-result').textContent =
+            'ربات در حال فکر کردن...';
+
+        setTimeout(computerMove, 400);
+
+    }
+
+
+    function computerMove() {
+
+        if (gameOver) {
+            return;
+        }
+
+        const empty =
+            board
+                .map((value, index) =>
+                    value === '' ? index : null
+                )
+                .filter(index => index !== null);
+
+        if (empty.length === 0) {
+            finishTicTacToe('draw');
+            return;
+        }
+
+        const index =
+            empty[Math.floor(Math.random() * empty.length)];
+
+        board[index] = '⭕';
+
+        renderBoard();
+
+        const result = checkWinner();
+
+        if (result) {
+            finishTicTacToe(result);
+        } else {
+            document.getElementById('ttt-result').textContent =
+                'نوبت شماست 👆';
+        }
+
+    }
+
+
+    function checkWinner() {
+
+        const lines = [
+
+            [0,1,2],
+            [3,4,5],
+            [6,7,8],
+
+            [0,3,6],
+            [1,4,7],
+            [2,5,8],
+
+            [0,4,8],
+            [2,4,6]
+
+        ];
+
+        for (const line of lines) {
+
+            const [a,b,c] = line;
+
+            if (
+                board[a] &&
+                board[a] === board[b] &&
+                board[a] === board[c]
+            ) {
+
+                return board[a];
+
+            }
+
+        }
+
+        if (!board.includes('')) {
+            return 'draw';
+        }
+
+        return null;
+
+    }
+
+
+    function finishTicTacToe(result) {
+
+        gameOver = true;
+
+        const resultElement =
+            document.getElementById('ttt-result');
+
+        if (result === '❌') {
+
+            resultElement.textContent =
+                '🎉 بردی!';
+
+        } else if (result === '⭕') {
+
+            resultElement.textContent =
+                '😅 ربات برد!';
+
+        } else {
+
+            resultElement.textContent =
+                '🤝 مساوی شد!';
+
+        }
+
+    }
+
+
+    // =========================
+    // ROCK PAPER SCISSORS
+    // =========================
+
+    let rpsLocked = false;
+
+    const rpsNames = {
+
+        rock: '✊',
+        paper: '📄',
+        scissors: '✂️'
+
+    };
+
+
+    function playRPS(player) {
+
+        if (rpsLocked) {
+            return;
+        }
+
+        rpsLocked = true;
+
+        const choices = [
+            'rock',
+            'paper',
+            'scissors'
+        ];
+
+        const computer =
+            choices[
+                Math.floor(
+                    Math.random() * choices.length
+                )
+            ];
+
+        let result;
+
+        if (player === computer) {
+
+            result = '🤝 مساوی!';
+
+        } else if (
+
+            (player === 'rock' && computer === 'scissors') ||
+            (player === 'paper' && computer === 'rock') ||
+            (player === 'scissors' && computer === 'paper')
+
+        ) {
+
+            result = '🎉 تو بردی!';
+
+        } else {
+
+            result = '😅 کامپیوتر برد!';
+
+        }
+
+        document.getElementById('rps-result').innerHTML =
+            `تو: ${rpsNames[player]}
+            <br>
+            کامپیوتر: ${rpsNames[computer]}
+            <br><br>
+            ${result}`;
+
+    }
+
+
+    function resetRPS() {
+
+        rpsLocked = false;
+
+        document.getElementById('rps-result').textContent =
+            'آماده‌ای؟ 😎';
+
+    }
+
+
+    // =========================
+    // CARD GAME
+    // =========================
+
+    const suits = [
+        '♥️',
+        '♦️',
+        '♣️',
+        '♠️'
+    ];
+
+    const ranks = [
+        'A',
+        '2',
+        '3',
+        '4',
+        '5',
+        '6',
+        '7',
+        '8',
+        '9',
+        '10',
+        'J',
+        'Q',
+        'K'
+    ];
+
+
+    function drawCard() {
+
+        const suit =
+            suits[
+                Math.floor(
+                    Math.random() * suits.length
+                )
+            ];
+
+        const rank =
+            ranks[
+                Math.floor(
+                    Math.random() * ranks.length
+                )
+            ];
+
+        document.getElementById('playing-card')
+            .textContent = `${rank}${suit}`;
+
+        document.getElementById('card-result')
+            .textContent =
+            `کارت تو: ${rank} ${suit} 🃏`;
+
+    }
+
+</script>
+
+</body>
+</html>
