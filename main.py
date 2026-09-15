@@ -1,9 +1,13 @@
-```python
 import os
 import sqlite3
 import logging
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,6 +18,9 @@ from telegram.ext import (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = "@CUPiniran"
 ADMIN_ID = 8085645948
+
+# لینک مینی‌گیم‌ها
+MINI_APP_URL = os.environ.get("MINI_APP_URL", "").rstrip("/")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,44 +45,34 @@ db.commit()
 # =====================================
 
 def add_user(user_id, username, first_name, invited_by=None):
-
     cur.execute(
-        "SELECT id, invited_by FROM users WHERE id=?",
+        "SELECT id FROM users WHERE id=?",
         (user_id,)
     )
 
     existing = cur.fetchone()
 
     if existing:
-        # اگر قبلاً ثبت شده، دعوت‌کننده قبلی تغییر نکند
-        # فقط اطلاعات کاربر به‌روز شود
-        cur.execute(
-            """
+        cur.execute("""
             UPDATE users
             SET username=?, first_name=?
             WHERE id=?
-            """,
-            (
-                username,
-                first_name,
-                user_id
-            )
-        )
-
+        """, (
+            username,
+            first_name,
+            user_id
+        ))
     else:
-        cur.execute(
-            """
+        cur.execute("""
             INSERT INTO users
             (id, username, first_name, invited_by)
             VALUES (?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                username,
-                first_name,
-                invited_by
-            )
-        )
+        """, (
+            user_id,
+            username,
+            first_name,
+            invited_by
+        ))
 
     db.commit()
 
@@ -85,7 +82,6 @@ def add_user(user_id, username, first_name, invited_by=None):
 # =====================================
 
 def menu():
-
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -97,6 +93,12 @@ def menu():
             InlineKeyboardButton(
                 "✅ بررسی عضویت",
                 callback_data="check"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎮 مینی‌گیم‌ها",
+                callback_data="games"
             )
         ],
         [
@@ -119,9 +121,7 @@ def menu():
 # =====================================
 
 async def check_membership(user_id, context):
-
     try:
-
         member = await context.bot.get_chat_member(
             CHANNEL,
             user_id
@@ -134,11 +134,9 @@ async def check_membership(user_id, context):
         )
 
     except Exception as e:
-
         logging.warning(
             f"Membership check failed: {e}"
         )
-
         return False
 
 
@@ -149,21 +147,14 @@ async def check_membership(user_id, context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
-
     invited_by = None
 
-    # ---------------------------------
     # بررسی لینک دعوت
-    # ---------------------------------
-
     if context.args:
-
         try:
-
             ref_id = int(context.args[0])
 
             if ref_id != user.id:
-
                 cur.execute(
                     "SELECT id FROM users WHERE id=?",
                     (ref_id,)
@@ -172,30 +163,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ref_exists = cur.fetchone()
 
                 if ref_exists:
-
                     invited_by = ref_id
 
         except ValueError:
-
             pass
 
-    # ---------------------------------
     # بررسی اولین استارت
-    # ---------------------------------
-
     cur.execute(
         "SELECT id FROM users WHERE id=?",
         (user.id,)
     )
 
     existing_user = cur.fetchone()
-
     is_first_start = existing_user is None
 
-    # ---------------------------------
     # ثبت کاربر
-    # ---------------------------------
-
     add_user(
         user.id,
         user.username,
@@ -203,10 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invited_by
     )
 
-    # ---------------------------------
     # اطلاع به ادمین فقط اولین استارت
-    # ---------------------------------
-
     if is_first_start:
 
         username_text = (
@@ -223,14 +202,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if invited_by:
 
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT username, first_name
                 FROM users
                 WHERE id=?
-                """,
-                (invited_by,)
-            )
+            """, (invited_by,))
 
             inviter = cur.fetchone()
 
@@ -240,22 +216,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 inviter_first_name = inviter[1]
 
                 if inviter_username:
-
                     inviter_text = f"@{inviter_username}"
-
                 else:
-
                     inviter_text = (
                         inviter_first_name
                         or str(invited_by)
                     )
 
             else:
-
                 inviter_text = str(invited_by)
 
         else:
-
             inviter_text = "مستقیم / بدون لینک دعوت"
 
         admin_text = (
@@ -267,22 +238,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=admin_text
             )
-
         except Exception as e:
-
             logging.warning(
                 f"Failed to notify admin: {e}"
             )
 
-    # ---------------------------------
     # پیام خوش‌آمدگویی
-    # ---------------------------------
-
     await update.message.reply_text(
         "سلام، خوش اومدی 👋\n\n"
         "با عضو شدن در کانال یک امتیاز به دست میاری 🎁\n"
@@ -300,7 +265,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
-
     await query.answer()
 
     user_id = query.from_user.id
@@ -318,20 +282,17 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if joined:
 
-            cur.execute(
-                """
+            cur.execute("""
                 UPDATE users
                 SET joined=1,
                     username=?,
                     first_name=?
                 WHERE id=?
-                """,
-                (
-                    query.from_user.username,
-                    query.from_user.first_name,
-                    user_id
-                )
-            )
+            """, (
+                query.from_user.username,
+                query.from_user.first_name,
+                user_id
+            ))
 
             db.commit()
 
@@ -350,31 +311,99 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     # -------------------------
+    # مینی‌گیم‌ها
+    # -------------------------
+
+    elif query.data == "games":
+
+        # اول عضویت را بررسی می‌کنیم
+        joined = await check_membership(
+            user_id,
+            context
+        )
+
+        if not joined:
+
+            await query.message.reply_text(
+                "🔒 دسترسی به مینی‌گیم‌ها فقط برای اعضای کانال است.\n\n"
+                "ابتدا عضو کانال شو و بعد «بررسی عضویت» رو بزن.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "📢 عضویت در کانال",
+                            url="https://t.me/CUPiniran"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "✅ بررسی عضویت",
+                            callback_data="check"
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        # ثبت عضویت تأییدشده
+        cur.execute("""
+            UPDATE users
+            SET joined=1,
+                username=?,
+                first_name=?
+            WHERE id=?
+        """, (
+            query.from_user.username,
+            query.from_user.first_name,
+            user_id
+        ))
+
+        db.commit()
+
+        # بررسی تنظیم شدن لینک Mini App
+        if not MINI_APP_URL:
+
+            await query.message.reply_text(
+                "⚠️ لینک مینی‌گیم هنوز در تنظیمات بات قرار نگرفته."
+            )
+
+            return
+
+        # باز کردن Mini App
+        await query.message.reply_text(
+            "🎮 مینی‌گیم‌ها آماده‌ان! 👇",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🎮 ورود به مینی‌گیم‌ها",
+                        web_app=WebAppInfo(
+                            url=MINI_APP_URL
+                        )
+                    )
+                ]
+            ])
+        )
+
+    # -------------------------
     # پروفایل
     # -------------------------
 
     elif query.data == "profile":
 
-        cur.execute(
-            """
+        cur.execute("""
             SELECT COUNT(*)
             FROM users
             WHERE invited_by=?
             AND joined=1
-            """,
-            (user_id,)
-        )
+        """, (user_id,))
 
         referrals = cur.fetchone()[0]
 
-        cur.execute(
-            """
+        cur.execute("""
             SELECT joined
             FROM users
             WHERE id=?
-            """,
-            (user_id,)
-        )
+        """, (user_id,))
 
         result = cur.fetchone()
 
@@ -409,15 +438,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"?start={user_id}"
         )
 
-        cur.execute(
-            """
+        cur.execute("""
             SELECT COUNT(*)
             FROM users
             WHERE invited_by=?
             AND joined=1
-            """,
-            (user_id,)
-        )
+        """, (user_id,))
 
         count = cur.fetchone()[0]
 
@@ -442,26 +468,20 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    cur.execute(
-        "SELECT COUNT(*) FROM users"
-    )
-
+    cur.execute("SELECT COUNT(*) FROM users")
     total = cur.fetchone()[0]
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT COUNT(*)
         FROM users
         WHERE joined=1
-        """
-    )
-
+    """)
     joined = cur.fetchone()[0]
 
     await update.message.reply_text(
         "🛠 پنل مدیریت\n\n"
         f"👥 کل کاربران: {total}\n"
-        f"✅ اعضای تأییدشده: {joined}\n\n"
+        f"🏆 اعضای تأییدشده: {joined}\n\n"
         "دستورهای مدیریت:\n\n"
         "/stats - آمار و رتبه دعوت‌ها\n"
         "/members - لیست اعضای دعوت‌شده\n"
@@ -478,30 +498,21 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    cur.execute(
-        "SELECT COUNT(*) FROM users"
-    )
-
+    cur.execute("SELECT COUNT(*) FROM users")
     total = cur.fetchone()[0]
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT COUNT(*)
         FROM users
         WHERE joined=1
-        """
-    )
-
+    """)
     joined = cur.fetchone()[0]
 
-    cur.execute(
-        """
+    cur.execute("""
         SELECT COUNT(*)
         FROM users
         WHERE joined=0
-        """
-    )
-
+    """)
     not_joined = cur.fetchone()[0]
 
     cur.execute("""
@@ -509,6 +520,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u.id,
             u.username,
             u.first_name,
+            u.joined,
             COUNT(r.id) AS referrals
         FROM users u
         LEFT JOIN users r
@@ -525,7 +537,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📊 آمار ربات\n\n"
         f"👥 کل کاربران: {total}\n"
-        f"✅ عضو تأییدشده: {joined}\n"
+        f"🏆 عضو تأییدشده: {joined}\n"
         f"❌ تأییدنشده: {not_joined}\n\n"
         "🏆 برترین دعوت‌کننده‌ها:\n\n"
     )
@@ -544,18 +556,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = row[0]
             username = row[1]
             first_name = row[2]
-            referrals = row[3]
+            user_joined = row[3]
+            referrals = row[4]
 
             if username:
-
                 name = f"@{username}"
-
             else:
-
                 name = first_name or str(user_id)
 
+            trophy = "🏆 " if user_joined else ""
+
             text += (
-                f"{i}. {name}\n"
+                f"{i}. {trophy}{name}\n"
                 f"   👥 دعوت موفق: {referrals}\n\n"
             )
 
@@ -577,6 +589,7 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r.username,
             r.first_name,
             r.invited_by,
+            r.joined,
             u.username,
             u.first_name
         FROM users r
@@ -608,33 +621,27 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         member_username = row[1]
         member_first_name = row[2]
 
-        inviter_username = row[4]
-        inviter_first_name = row[5]
+        inviter_username = row[5]
+        inviter_first_name = row[6]
 
         if member_username:
-
             member_name = f"@{member_username}"
-
         else:
-
             member_name = (
                 member_first_name
                 or str(member_id)
             )
 
         if inviter_username:
-
             inviter_name = f"@{inviter_username}"
-
         else:
-
             inviter_name = (
                 inviter_first_name
                 or "نامشخص"
             )
 
         text += (
-            f"{i}. {member_name}\n"
+            f"{i}. 🏆 {member_name}\n"
             f"   🆔 ID: {member_id}\n"
             f"   👤 دعوت‌کننده: {inviter_name}\n\n"
         )
@@ -646,7 +653,6 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "👥 ادامه لیست:\n\n"
 
     if text.strip() != "👥 ادامه لیست:":
-
         await update.message.reply_text(text)
 
 
@@ -670,9 +676,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = " ".join(context.args)
 
-    cur.execute(
-        "SELECT id FROM users"
-    )
+    cur.execute("SELECT id FROM users")
 
     users = cur.fetchall()
 
@@ -764,4 +768,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
