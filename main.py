@@ -1,12 +1,21 @@
+```python
 import os
 import sqlite3
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import html
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # =========================
@@ -15,9 +24,20 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# آیدی عددی اکانت ادمین
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
 CHANNELS = [
-    ("@CUPiniran", "📢 کانال CUPiniran", "https://t.me/CUPiniran"),
-    ("@nabzegahan", "📢 کانال نبض جهان", "https://t.me/nabzegahan"),
+    (
+        "@CUPiniran",
+        "📢 کانال CUPiniran",
+        "https://t.me/CUPiniran"
+    ),
+    (
+        "@nabzegahan",
+        "📢 کانال نبض جهان",
+        "https://t.me/nabzegahan"
+    ),
 ]
 
 DB_FILE = "bot.db"
@@ -61,7 +81,12 @@ def init_db():
     conn.close()
 
 
-def add_or_update_user(user_id, username, first_name, invited_by=None):
+def add_or_update_user(
+    user_id,
+    username,
+    first_name,
+    invited_by=None
+):
     conn = get_db()
 
     existing = conn.execute(
@@ -70,6 +95,7 @@ def add_or_update_user(user_id, username, first_name, invited_by=None):
     ).fetchone()
 
     if existing is None:
+
         # جلوگیری از دعوت کردن خودش
         if invited_by == user_id:
             invited_by = None
@@ -84,8 +110,10 @@ def add_or_update_user(user_id, username, first_name, invited_by=None):
             first_name,
             invited_by,
         ))
+
     else:
-        # invited_by قبلی را حفظ می‌کنیم
+
+        # invited_by قبلی حفظ می‌شود
         conn.execute("""
             UPDATE users
             SET username = ?, first_name = ?
@@ -101,11 +129,511 @@ def add_or_update_user(user_id, username, first_name, invited_by=None):
 
 
 # =========================
+# ADMIN
+# =========================
+
+def is_admin(user_id):
+    return ADMIN_ID != 0 and user_id == ADMIN_ID
+
+
+async def admin_only(update: Update):
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        if update.message:
+            await update.message.reply_text(
+                "⛔ شما اجازه دسترسی به پنل مدیریت را ندارید."
+            )
+        return False
+
+    return True
+
+
+# =========================
+# ADMIN MENU
+# =========================
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not await admin_only(update):
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📊 آمار کلی",
+                callback_data="admin_stats"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 لیست کاربران",
+                callback_data="admin_users"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏆 رتبه‌بندی امتیازات",
+                callback_data="admin_top"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔗 دعوت‌ها",
+                callback_data="admin_referrals"
+            )
+        ],
+    ]
+
+    await update.message.reply_text(
+        "🔐 پنل مدیریت\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADMIN STATS
+# =========================
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    conn = get_db()
+
+    total = conn.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    joined_cup = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE joined_cup = 1"
+    ).fetchone()["c"]
+
+    joined_nabz = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE joined_nabz = 1"
+    ).fetchone()["c"]
+
+    fully_joined = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE joined_cup = 1
+        AND joined_nabz = 1
+    """).fetchone()["c"]
+
+    referral_users = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE invited_by IS NOT NULL
+    """).fetchone()["c"]
+
+    total_points = conn.execute("""
+        SELECT COALESCE(SUM(points), 0) AS s
+        FROM users
+    """).fetchone()["s"]
+
+    conn.close()
+
+    text = (
+        "📊 <b>آمار کلی بات</b>\n\n"
+        f"👥 کل کاربران: <b>{total}</b>\n"
+        f"📢 عضو CUPiniran: <b>{joined_cup}</b>\n"
+        f"📢 عضو نبض جهان: <b>{joined_nabz}</b>\n"
+        f"✅ عضویت کامل: <b>{fully_joined}</b>\n"
+        f"🔗 کاربران دارای دعوت‌کننده: <b>{referral_users}</b>\n"
+        f"⭐ مجموع امتیازات: <b>{total_points}</b>"
+    )
+
+    keyboard = [[
+        InlineKeyboardButton(
+            "🔙 پنل مدیریت",
+            callback_data="admin_home"
+        )
+    ]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADMIN USERS
+# =========================
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 50
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        text = "👥 هنوز هیچ کاربری ثبت نشده."
+    else:
+
+        lines = [
+            "👥 <b>آخرین کاربران</b>\n"
+        ]
+
+        for index, user in enumerate(users, 1):
+
+            name = html.escape(
+                user["first_name"] or "بدون نام"
+            )
+
+            username = (
+                f"@{html.escape(user['username'])}"
+                if user["username"]
+                else "بدون یوزرنیم"
+            )
+
+            inviter = (
+                str(user["invited_by"])
+                if user["invited_by"]
+                else "بدون دعوت‌کننده"
+            )
+
+            joined = "✅" if (
+                user["joined_cup"]
+                and user["joined_nabz"]
+            ) else "❌"
+
+            lines.append(
+                f"{index}. {name} | {username}\n"
+                f"🆔 <code>{user['id']}</code>\n"
+                f"🔗 دعوت‌کننده: <code>{inviter}</code>\n"
+                f"⭐ امتیاز: <b>{user['points']}</b>\n"
+                f"📢 عضویت کامل: {joined}\n"
+            )
+
+        text = "\n".join(lines)
+
+    keyboard = [[
+        InlineKeyboardButton(
+            "🔙 پنل مدیریت",
+            callback_data="admin_home"
+        )
+    ]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADMIN TOP
+# =========================
+
+async def admin_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        ORDER BY points DESC, created_at ASC
+        LIMIT 50
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        text = "🏆 هنوز کاربری وجود ندارد."
+
+    else:
+
+        lines = [
+            "🏆 <b>رتبه‌بندی امتیازات</b>\n"
+        ]
+
+        medals = ["🥇", "🥈", "🥉"]
+
+        for index, user in enumerate(users, 1):
+
+            name = html.escape(
+                user["first_name"] or "بدون نام"
+            )
+
+            username = (
+                f"@{html.escape(user['username'])}"
+                if user["username"]
+                else ""
+            )
+
+            medal = (
+                medals[index - 1]
+                if index <= 3
+                else f"{index}."
+            )
+
+            lines.append(
+                f"{medal} {name} {username}\n"
+                f"🆔 <code>{user['id']}</code> "
+                f"⭐ <b>{user['points']}</b>\n"
+            )
+
+        text = "\n".join(lines)
+
+    keyboard = [[
+        InlineKeyboardButton(
+            "🔙 پنل مدیریت",
+            callback_data="admin_home"
+        )
+    ]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADMIN REFERRALS
+# =========================
+
+async def admin_referrals(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT
+            u.id,
+            u.first_name,
+            u.username,
+            u.invited_by,
+            u.points,
+            u.referral_rewarded
+        FROM users u
+        WHERE u.invited_by IS NOT NULL
+        ORDER BY u.created_at DESC
+        LIMIT 50
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        text = "🔗 هنوز کسی با لینک دعوت وارد نشده."
+
+    else:
+
+        lines = [
+            "🔗 <b>لیست دعوت‌ها</b>\n"
+        ]
+
+        for index, user in enumerate(users, 1):
+
+            name = html.escape(
+                user["first_name"] or "بدون نام"
+            )
+
+            rewarded = (
+                "✅ امتیاز دعوت ثبت شده"
+                if user["referral_rewarded"]
+                else "⏳ هنوز پاداش ثبت نشده"
+            )
+
+            lines.append(
+                f"{index}. {name}\n"
+                f"🆔 کاربر: <code>{user['id']}</code>\n"
+                f"👤 دعوت‌کننده: <code>{user['invited_by']}</code>\n"
+                f"⭐ امتیاز کاربر: <b>{user['points']}</b>\n"
+                f"{rewarded}\n"
+            )
+
+        text = "\n".join(lines)
+
+    keyboard = [[
+        InlineKeyboardButton(
+            "🔙 پنل مدیریت",
+            callback_data="admin_home"
+        )
+    ]]
+
+    await query.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADMIN HOME CALLBACK
+# =========================
+
+async def admin_home(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📊 آمار کلی",
+                callback_data="admin_stats"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 لیست کاربران",
+                callback_data="admin_users"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏆 رتبه‌بندی امتیازات",
+                callback_data="admin_top"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔗 دعوت‌ها",
+                callback_data="admin_referrals"
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        "🔐 <b>پنل مدیریت</b>\n\n"
+        "مدیریت کاربران و امتیازات:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# USER SEARCH
+# =========================
+
+async def user_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not await admin_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "مثال:\n"
+            "/user 123456789"
+        )
+        return
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ آیدی باید عددی باشد."
+        )
+        return
+
+    conn = get_db()
+
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+
+    conn.close()
+
+    if not user:
+        await update.message.reply_text(
+            "❌ این کاربر در دیتابیس پیدا نشد."
+        )
+        return
+
+    name = html.escape(
+        user["first_name"] or "بدون نام"
+    )
+
+    username = (
+        f"@{html.escape(user['username'])}"
+        if user["username"]
+        else "بدون یوزرنیم"
+    )
+
+    inviter = (
+        str(user["invited_by"])
+        if user["invited_by"]
+        else "ندارد"
+    )
+
+    text = (
+        "👤 <b>اطلاعات کاربر</b>\n\n"
+        f"نام: {name}\n"
+        f"یوزرنیم: {username}\n"
+        f"🆔 ID: <code>{user['id']}</code>\n"
+        f"⭐ امتیاز: <b>{user['points']}</b>\n"
+        f"🔗 دعوت‌کننده: <code>{inviter}</code>\n"
+        f"📢 CUPiniran: "
+        f"{'✅' if user['joined_cup'] else '❌'}\n"
+        f"📢 نبض جهان: "
+        f"{'✅' if user['joined_nabz'] else '❌'}\n"
+        f"🎁 پاداش دعوت: "
+        f"{'✅' if user['referral_rewarded'] else '❌'}\n"
+        f"🕐 ثبت: {user['created_at']}"
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML"
+    )
+
+
+# =========================
 # MEMBERSHIP
 # =========================
 
-async def check_channel_membership(bot, user_id, channel):
+async def check_channel_membership(
+    bot,
+    user_id,
+    channel
+):
+
     try:
+
         member = await bot.get_chat_member(
             chat_id=channel,
             user_id=user_id
@@ -118,16 +646,19 @@ async def check_channel_membership(bot, user_id, channel):
         )
 
     except Exception as e:
+
         logger.warning(
             "Membership check failed for %s in %s: %s",
             user_id,
             channel,
             e,
         )
+
         return False
 
 
 async def check_all_memberships(bot, user_id):
+
     cup = await check_channel_membership(
         bot,
         user_id,
@@ -147,18 +678,23 @@ async def check_all_memberships(bot, user_id):
 # START
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     user = update.effective_user
 
     if not user:
         return
 
-    # دریافت پارامتر دعوت
     invited_by = None
 
     if context.args:
+
         try:
             invited_by = int(context.args[0])
+
         except ValueError:
             invited_by = None
 
@@ -172,6 +708,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
 
     for _, title, url in CHANNELS:
+
         keyboard.append([
             InlineKeyboardButton(
                 title,
@@ -203,7 +740,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"سلام {user.first_name} 👋\n\n"
         "به ربات خوش آمدی.\n\n"
-        "برای فعال شدن حساب امتیازی، ابتدا در کانال‌های زیر عضو شو:\n\n"
+        "برای فعال شدن حساب امتیازی، ابتدا "
+        "در کانال‌های زیر عضو شو:\n\n"
         "📢 CUPiniran\n"
         "📢 نبض جهان\n\n"
         "بعد از عضویت روی «بررسی عضویت» بزن."
@@ -219,7 +757,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MEMBERSHIP CHECK
 # =========================
 
-async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def check_membership(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     query = update.callback_query
 
     await query.answer()
@@ -239,13 +781,13 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ).fetchone()
 
     if row is None:
+
         conn.close()
         return
 
     old_cup = row["joined_cup"]
     old_nabz = row["joined_nabz"]
 
-    # ذخیره وضعیت عضویت
     conn.execute("""
         UPDATE users
         SET joined_cup = ?, joined_nabz = ?
@@ -256,15 +798,18 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user.id,
     ))
 
-    # هر عضویت موفق فقط یک بار امتیاز می‌گیرد
+    # امتیاز عضویت CUP
     if cup and not old_cup:
+
         conn.execute("""
             UPDATE users
             SET points = points + 1
             WHERE id = ?
         """, (user.id,))
 
+    # امتیاز عضویت نبض
     if nabz and not old_nabz:
+
         conn.execute("""
             UPDATE users
             SET points = points + 1
@@ -273,7 +818,10 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.commit()
 
-    # بررسی دعوت موفق
+    # =====================
+    # REFERRAL REWARD
+    # =====================
+
     row = conn.execute(
         "SELECT * FROM users WHERE id = ?",
         (user.id,)
@@ -286,6 +834,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and row["referral_rewarded"] == 0
         and row["invited_by"] != user.id
     ):
+
         inviter = row["invited_by"]
 
         inviter_exists = conn.execute(
@@ -294,6 +843,7 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchone()
 
         if inviter_exists:
+
             conn.execute("""
                 UPDATE users
                 SET points = points + 1
@@ -318,12 +868,15 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points = final_row["points"]
 
     if cup and nabz:
+
         text = (
             "✅ عضویت شما با موفقیت تأیید شد!\n\n"
             "🏆 سیستم امتیازدهی برای شما فعال است.\n\n"
             f"⭐ امتیاز فعلی: {points}"
         )
+
     else:
+
         missing = []
 
         if not cup:
@@ -365,7 +918,11 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # POINTS
 # =========================
 
-async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def my_points(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     query = update.callback_query
 
     await query.answer()
@@ -416,7 +973,11 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # REFERRAL
 # =========================
 
-async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def invite(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     query = update.callback_query
 
     await query.answer()
@@ -438,14 +999,12 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "برای شما ۱ امتیاز ثبت می‌شود. ⭐"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="back_home"
-            )
-        ]
-    ]
+    keyboard = [[
+        InlineKeyboardButton(
+            "🔙 بازگشت",
+            callback_data="back_home"
+        )
+    ]]
 
     await query.edit_message_text(
         text,
@@ -457,7 +1016,11 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # HOME
 # =========================
 
-async def back_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def back_home(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     query = update.callback_query
 
     await query.answer()
@@ -465,6 +1028,7 @@ async def back_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
 
     for _, title, url in CHANNELS:
+
         keyboard.append([
             InlineKeyboardButton(
                 title,
@@ -505,13 +1069,228 @@ async def back_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# TEXT ADMIN COMMANDS
+# =========================
+
+async def admin_text_commands(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    text = update.message.text.strip().lower()
+
+    if text == "admin":
+        await admin(update, context)
+
+    elif text in ("stats", "stast"):
+        await admin_stats_direct(update, context)
+
+    elif text == "users":
+        await admin_users_direct(update, context)
+
+    elif text == "top":
+        await admin_top_direct(update, context)
+
+    elif text == "referrals":
+        await admin_referrals_direct(update, context)
+
+
+# =========================
+# DIRECT ADMIN COMMAND VERSIONS
+# =========================
+
+async def admin_stats_direct(update, context):
+
+    conn = get_db()
+
+    total = conn.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    cup = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE joined_cup=1"
+    ).fetchone()["c"]
+
+    nabz = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE joined_nabz=1"
+    ).fetchone()["c"]
+
+    full = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE joined_cup=1 AND joined_nabz=1
+    """).fetchone()["c"]
+
+    referrals = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE invited_by IS NOT NULL
+    """).fetchone()["c"]
+
+    points = conn.execute("""
+        SELECT COALESCE(SUM(points),0) AS s
+        FROM users
+    """).fetchone()["s"]
+
+    conn.close()
+
+    await update.message.reply_text(
+        "📊 آمار کلی\n\n"
+        f"👥 کل کاربران: {total}\n"
+        f"📢 CUPiniran: {cup}\n"
+        f"📢 نبض جهان: {nabz}\n"
+        f"✅ عضویت کامل: {full}\n"
+        f"🔗 دارای دعوت‌کننده: {referrals}\n"
+        f"⭐ مجموع امتیازات: {points}"
+    )
+
+
+async def admin_users_direct(update, context):
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 30
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        await update.message.reply_text(
+            "👥 هنوز کاربری ثبت نشده."
+        )
+        return
+
+    lines = ["👥 آخرین کاربران:\n"]
+
+    for i, user in enumerate(users, 1):
+
+        name = user["first_name"] or "بدون نام"
+
+        inviter = (
+            str(user["invited_by"])
+            if user["invited_by"]
+            else "ندارد"
+        )
+
+        lines.append(
+            f"{i}. {name}\n"
+            f"🆔 {user['id']}\n"
+            f"🔗 دعوت‌کننده: {inviter}\n"
+            f"⭐ امتیاز: {user['points']}\n"
+            f"📅 {user['created_at']}\n"
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines)
+    )
+
+
+async def admin_top_direct(update, context):
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        ORDER BY points DESC, created_at ASC
+        LIMIT 30
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        await update.message.reply_text(
+            "🏆 کاربری وجود ندارد."
+        )
+        return
+
+    lines = ["🏆 رتبه‌بندی:\n"]
+
+    for i, user in enumerate(users, 1):
+
+        name = user["first_name"] or "بدون نام"
+
+        lines.append(
+            f"{i}. {name}\n"
+            f"🆔 {user['id']}\n"
+            f"⭐ {user['points']} امتیاز\n"
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines)
+    )
+
+
+async def admin_referrals_direct(update, context):
+
+    conn = get_db()
+
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        WHERE invited_by IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 30
+    """).fetchall()
+
+    conn.close()
+
+    if not users:
+        await update.message.reply_text(
+            "🔗 هنوز دعوتی ثبت نشده."
+        )
+        return
+
+    lines = ["🔗 دعوت‌ها:\n"]
+
+    for i, user in enumerate(users, 1):
+
+        name = user["first_name"] or "بدون نام"
+
+        reward = (
+            "✅ پاداش ثبت شده"
+            if user["referral_rewarded"]
+            else "⏳ پاداش ثبت نشده"
+        )
+
+        lines.append(
+            f"{i}. {name}\n"
+            f"🆔 {user['id']}\n"
+            f"👤 دعوت‌کننده: {user['invited_by']}\n"
+            f"{reward}\n"
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines)
+    )
+
+
+# =========================
 # MAIN
 # =========================
 
 def main():
+
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is not set."
+        )
+
+    if ADMIN_ID == 0:
+        raise RuntimeError(
+            "ADMIN_ID environment variable is not set."
         )
 
     init_db()
@@ -522,9 +1301,45 @@ def main():
         .build()
     )
 
+    # =====================
+    # USER COMMANDS
+    # =====================
+
     application.add_handler(
         CommandHandler("start", start)
     )
+
+    application.add_handler(
+        CommandHandler("user", user_command)
+    )
+
+    # =====================
+    # ADMIN COMMANDS
+    # =====================
+
+    application.add_handler(
+        CommandHandler("admin", admin)
+    )
+
+    application.add_handler(
+        CommandHandler("stats", admin_stats_direct)
+    )
+
+    application.add_handler(
+        CommandHandler("users", admin_users_direct)
+    )
+
+    application.add_handler(
+        CommandHandler("top", admin_top_direct)
+    )
+
+    application.add_handler(
+        CommandHandler("referrals", admin_referrals_direct)
+    )
+
+    # =====================
+    # CALLBACKS
+    # =====================
 
     application.add_handler(
         CallbackQueryHandler(
@@ -554,6 +1369,52 @@ def main():
         )
     )
 
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_home,
+            pattern="^admin_home$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_stats,
+            pattern="^admin_stats$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_users,
+            pattern="^admin_users$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_top,
+            pattern="^admin_top$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_referrals,
+            pattern="^admin_referrals$"
+        )
+    )
+
+    # =====================
+    # PLAIN TEXT ADMIN
+    # =====================
+
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            admin_text_commands
+        )
+    )
+
     logger.info("Bot is starting...")
 
     application.run_polling(
@@ -563,3 +1424,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
