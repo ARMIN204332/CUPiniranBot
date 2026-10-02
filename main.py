@@ -11,11 +11,22 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# =====================================
+# تنظیمات
+# =====================================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL = "@CUPiniran"
+
+CHANNEL_1 = "@CUPiniran"
+CHANNEL_2 = "@nabzegahan"
+
 ADMIN_ID = 8085645948
 
 logging.basicConfig(level=logging.INFO)
+
+# =====================================
+# دیتابیس
+# =====================================
 
 db = sqlite3.connect("bot.db", check_same_thread=False)
 cur = db.cursor()
@@ -26,11 +37,22 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     first_name TEXT,
     invited_by INTEGER,
-    joined INTEGER DEFAULT 0
+    joined INTEGER DEFAULT 0,
+    points INTEGER DEFAULT 0
 )
 """)
 
 db.commit()
+
+# -------------------------------------
+# سازگاری با دیتابیس قدیمی
+# -------------------------------------
+
+try:
+    cur.execute("ALTER TABLE users ADD COLUMN points INTEGER DEFAULT 0")
+    db.commit()
+except sqlite3.OperationalError:
+    pass
 
 
 # =====================================
@@ -40,15 +62,15 @@ db.commit()
 def add_user(user_id, username, first_name, invited_by=None):
 
     cur.execute(
-        "SELECT id, invited_by FROM users WHERE id=?",
+        "SELECT id FROM users WHERE id=?",
         (user_id,)
     )
 
     existing = cur.fetchone()
 
     if existing:
-        # اگر قبلاً ثبت شده، دعوت‌کننده قبلی تغییر نکند
-        # فقط اطلاعات کاربر به‌روز شود
+
+        # دعوت‌کننده قبلی تغییر نکند
         cur.execute(
             """
             UPDATE users
@@ -63,11 +85,12 @@ def add_user(user_id, username, first_name, invited_by=None):
         )
 
     else:
+
         cur.execute(
             """
             INSERT INTO users
-            (id, username, first_name, invited_by)
-            VALUES (?, ?, ?, ?)
+            (id, username, first_name, invited_by, joined, points)
+            VALUES (?, ?, ?, ?, 0, 0)
             """,
             (
                 user_id,
@@ -87,24 +110,35 @@ def add_user(user_id, username, first_name, invited_by=None):
 def menu():
 
     return InlineKeyboardMarkup([
+
         [
             InlineKeyboardButton(
-                "📢 عضویت در کانال",
+                "📢 عضویت در کانال CUP",
                 url="https://t.me/CUPiniran"
             )
         ],
+
+        [
+            InlineKeyboardButton(
+                "📢 عضویت در کانال نبض جهان",
+                url="https://t.me/nabzegahan"
+            )
+        ],
+
         [
             InlineKeyboardButton(
                 "✅ بررسی عضویت",
                 callback_data="check"
             )
         ],
+
         [
             InlineKeyboardButton(
-                "👤 حساب من",
+                "⭐ امتیاز من",
                 callback_data="profile"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "👥 دعوت دوستان",
@@ -115,15 +149,15 @@ def menu():
 
 
 # =====================================
-# بررسی عضویت کانال
+# بررسی عضویت در هر دو کانال
 # =====================================
 
-async def check_membership(user_id, context):
+async def check_one_channel(channel, user_id, context):
 
     try:
 
         member = await context.bot.get_chat_member(
-            CHANNEL,
+            channel,
             user_id
         )
 
@@ -136,10 +170,27 @@ async def check_membership(user_id, context):
     except Exception as e:
 
         logging.warning(
-            f"Membership check failed: {e}"
+            f"Membership check failed for {channel}: {e}"
         )
 
         return False
+
+
+async def check_membership(user_id, context):
+
+    channel_1_joined = await check_one_channel(
+        CHANNEL_1,
+        user_id,
+        context
+    )
+
+    channel_2_joined = await check_one_channel(
+        CHANNEL_2,
+        user_id,
+        context
+    )
+
+    return channel_1_joined and channel_2_joined
 
 
 # =====================================
@@ -172,11 +223,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ref_exists = cur.fetchone()
 
                 if ref_exists:
-
                     invited_by = ref_id
 
         except ValueError:
-
             pass
 
     # ---------------------------------
@@ -240,22 +289,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 inviter_first_name = inviter[1]
 
                 if inviter_username:
-
                     inviter_text = f"@{inviter_username}"
 
                 else:
-
                     inviter_text = (
                         inviter_first_name
                         or str(invited_by)
                     )
 
             else:
-
                 inviter_text = str(invited_by)
 
         else:
-
             inviter_text = "مستقیم / بدون لینک دعوت"
 
         admin_text = (
@@ -285,10 +330,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "سلام، خوش اومدی 👋\n\n"
-        "با عضو شدن در کانال یک امتیاز به دست میاری 🎁\n"
-        "و با هر دعوت موفق ۲ امتیاز! 👥\n\n"
-        "جوایز ما رو از دست نده 😍\n\n"
-        "💓💥💥",
+        "برای دریافت امتیاز باید عضو هر دو کانال زیر باشی:\n\n"
+        "📢 CUPiniran\n"
+        "📢 نبض جهان\n\n"
+        "⭐ عضویت موفق در هر دو کانال = ۱ امتیاز\n"
+        "👥 هر دعوت موفق = ۱ امتیاز\n\n"
+        "از منوی زیر استفاده کن 👇",
         reply_markup=menu()
     )
 
@@ -305,9 +352,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
 
-    # -------------------------
+    # =================================
     # بررسی عضویت
-    # -------------------------
+    # =================================
 
     if query.data == "check":
 
@@ -316,45 +363,156 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context
         )
 
+        # ---------------------------------
+        # عضویت موفق
+        # ---------------------------------
+
         if joined:
 
+            # وضعیت قبلی و امتیاز فعلی
             cur.execute(
                 """
-                UPDATE users
-                SET joined=1,
-                    username=?,
-                    first_name=?
+                SELECT joined, points, invited_by
+                FROM users
                 WHERE id=?
                 """,
-                (
-                    query.from_user.username,
-                    query.from_user.first_name,
-                    user_id
+                (user_id,)
+            )
+
+            result = cur.fetchone()
+
+            if result:
+
+                was_joined = result[0]
+                current_points = result[1]
+                invited_by = result[2]
+
+            else:
+
+                was_joined = 0
+                current_points = 0
+                invited_by = None
+
+            # ---------------------------------
+            # فقط اولین تأیید امتیاز بده
+            # ---------------------------------
+
+            if was_joined == 0:
+
+                # یک امتیاز برای عضویت
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET joined=1,
+                        points=points+1,
+                        username=?,
+                        first_name=?
+                    WHERE id=?
+                    """,
+                    (
+                        query.from_user.username,
+                        query.from_user.first_name,
+                        user_id
+                    )
                 )
-            )
 
-            db.commit()
+                # ---------------------------------
+                # یک امتیاز برای دعوت‌کننده
+                # ---------------------------------
 
-            await query.message.reply_text(
-                "✅ عضویت شما تأیید شد.\n\n"
-                "اکنون دسترسی شما فعال است.",
-                reply_markup=menu()
-            )
+                if invited_by:
+
+                    cur.execute(
+                        """
+                        UPDATE users
+                        SET points=points+1
+                        WHERE id=?
+                        """,
+                        (invited_by,)
+                    )
+
+                db.commit()
+
+                # امتیاز جدید
+                cur.execute(
+                    "SELECT points FROM users WHERE id=?",
+                    (user_id,)
+                )
+
+                new_points = cur.fetchone()[0]
+
+                await query.message.reply_text(
+                    "✅ عضویت شما در هر دو کانال تأیید شد.\n\n"
+                    "⭐ ۱ امتیاز بابت عضویت دریافت کردی!\n\n"
+                    f"🏆 امتیاز فعلی شما: {new_points}",
+                    reply_markup=menu()
+                )
+
+            else:
+
+                cur.execute(
+                    "SELECT points FROM users WHERE id=?",
+                    (user_id,)
+                )
+
+                points = cur.fetchone()[0]
+
+                await query.message.reply_text(
+                    "✅ عضویت شما قبلاً تأیید شده است.\n\n"
+                    f"🏆 امتیاز شما: {points}",
+                    reply_markup=menu()
+                )
+
+        # ---------------------------------
+        # عضویت ناقص
+        # ---------------------------------
 
         else:
 
             await query.message.reply_text(
-                "❌ عضویت شما هنوز تأیید نشده.\n\n"
-                "ابتدا عضو کانال شوید و دوباره بررسی کنید.",
+                "❌ عضویت شما کامل نیست.\n\n"
+                "ابتدا در هر دو کانال عضو شوید:\n\n"
+                "📢 @CUPiniran\n"
+                "📢 @nabzegahan\n\n"
+                "سپس دوباره روی «بررسی عضویت» بزنید.",
                 reply_markup=menu()
             )
 
-    # -------------------------
-    # پروفایل
-    # -------------------------
+
+    # =================================
+    # پروفایل / امتیاز
+    # =================================
 
     elif query.data == "profile":
 
+        cur.execute(
+            """
+            SELECT points, joined
+            FROM users
+            WHERE id=?
+            """,
+            (user_id,)
+        )
+
+        result = cur.fetchone()
+
+        if result:
+
+            points = result[0]
+            joined = result[1]
+
+        else:
+
+            points = 0
+            joined = 0
+
+        status = (
+            "✅ تأیید شده"
+            if joined
+            else "❌ تأیید نشده"
+        )
+
+        # تعداد دعوت موفق
         cur.execute(
             """
             SELECT COUNT(*)
@@ -367,37 +525,19 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         referrals = cur.fetchone()[0]
 
-        cur.execute(
-            """
-            SELECT joined
-            FROM users
-            WHERE id=?
-            """,
-            (user_id,)
-        )
-
-        result = cur.fetchone()
-
-        joined = result[0] if result else 0
-
-        status = (
-            "✅ تأیید شده"
-            if joined
-            else
-            "❌ تأیید نشده"
-        )
-
         await query.message.reply_text(
-            "👤 اطلاعات حساب\n\n"
+            "👤 حساب من\n\n"
             f"🆔 شناسه: {user_id}\n"
             f"📢 وضعیت عضویت: {status}\n"
-            f"👥 دعوت‌های موفق: {referrals}",
+            f"👥 دعوت‌های موفق: {referrals}\n"
+            f"⭐ امتیاز: {points}",
             reply_markup=menu()
         )
 
-    # -------------------------
+
+    # =================================
     # لینک دعوت
-    # -------------------------
+    # =================================
 
     elif query.data == "ref":
 
@@ -421,14 +561,23 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         count = cur.fetchone()[0]
 
+        cur.execute(
+            "SELECT points FROM users WHERE id=?",
+            (user_id,)
+        )
+
+        points = cur.fetchone()[0]
+
         await query.message.reply_text(
             "👥 دعوت دوستان\n\n"
-            f"تعداد دعوت موفق: {count}\n\n"
+            f"تعداد دعوت موفق: {count}\n"
+            f"⭐ امتیاز فعلی: {points}\n\n"
             "🔗 لینک اختصاصی شما:\n"
             f"{link}\n\n"
             "لینک را برای دوستانت بفرست.\n"
-            "فقط کسانی که عضو کانال شوند و عضویتشان "
-            "تأیید شود، دعوت موفق حساب می‌شوند.",
+            "هر شخصی که با لینک تو وارد شود، "
+            "عضویت هر دو کانال را تأیید کند، "
+            "۱ امتیاز برای تو ثبت می‌شود.",
             reply_markup=menu()
         )
 
@@ -458,19 +607,26 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     joined = cur.fetchone()[0]
 
+    cur.execute(
+        "SELECT COALESCE(SUM(points), 0) FROM users"
+    )
+
+    total_points = cur.fetchone()[0]
+
     await update.message.reply_text(
         "🛠 پنل مدیریت\n\n"
         f"👥 کل کاربران: {total}\n"
-        f"✅ اعضای تأییدشده: {joined}\n\n"
+        f"✅ اعضای تأییدشده: {joined}\n"
+        f"⭐ مجموع امتیازها: {total_points}\n\n"
         "دستورهای مدیریت:\n\n"
-        "/stats - آمار و رتبه دعوت‌ها\n"
-        "/members - لیست اعضای دعوت‌شده\n"
+        "/stats - آمار و رتبه امتیازها\n"
+        "/members - لیست اعضا و امتیازها\n"
         "/broadcast - ارسال پیام همگانی"
     )
 
 
 # =====================================
-# آمار
+# آمار و رتبه‌بندی امتیازها
 # =====================================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,66 +660,80 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     not_joined = cur.fetchone()[0]
 
-    cur.execute("""
-        SELECT
-            u.id,
-            u.username,
-            u.first_name,
-            COUNT(r.id) AS referrals
-        FROM users u
-        LEFT JOIN users r
-            ON r.invited_by = u.id
-            AND r.joined = 1
-        GROUP BY u.id
-        HAVING referrals > 0
-        ORDER BY referrals DESC
-        LIMIT 20
-    """)
+    cur.execute(
+        "SELECT COALESCE(SUM(points), 0) FROM users"
+    )
 
-    referrers = cur.fetchall()
+    total_points = cur.fetchone()[0]
+
+    # ---------------------------------
+    # رتبه‌بندی بر اساس امتیاز
+    # ---------------------------------
+
+    cur.execute(
+        """
+        SELECT
+            id,
+            username,
+            first_name,
+            points
+        FROM users
+        WHERE points > 0
+        ORDER BY points DESC, id ASC
+        LIMIT 30
+        """
+    )
+
+    users = cur.fetchall()
 
     text = (
         "📊 آمار ربات\n\n"
         f"👥 کل کاربران: {total}\n"
-        f"✅ عضو تأییدشده: {joined}\n"
-        f"❌ تأییدنشده: {not_joined}\n\n"
-        "🏆 برترین دعوت‌کننده‌ها:\n\n"
+        f"✅ اعضای تأییدشده: {joined}\n"
+        f"❌ تأییدنشده: {not_joined}\n"
+        f"⭐ مجموع امتیازها: {total_points}\n\n"
+        "🏆 برترین کاربران بر اساس امتیاز:\n\n"
     )
 
-    if not referrers:
+    if not users:
 
-        text += "هنوز دعوت موفقی ثبت نشده."
+        text += "هنوز امتیازی ثبت نشده."
 
     else:
 
-        for i, row in enumerate(
-            referrers,
-            start=1
-        ):
+        for i, row in enumerate(users, start=1):
 
             user_id = row[0]
             username = row[1]
             first_name = row[2]
-            referrals = row[3]
+            points = row[3]
 
             if username:
-
                 name = f"@{username}"
 
             else:
-
                 name = first_name or str(user_id)
 
             text += (
                 f"{i}. {name}\n"
-                f"   👥 دعوت موفق: {referrals}\n\n"
+                f"   🆔 ID: {user_id}\n"
+                f"   ⭐ امتیاز: {points}\n\n"
             )
 
-    await update.message.reply_text(text)
+    # تلگرام محدودیت طول پیام دارد
+    if len(text) <= 4000:
+
+        await update.message.reply_text(text)
+
+    else:
+
+        await update.message.reply_text(
+            text[:4000]
+        )
 
 
 # =====================================
-# لیست اعضای دعوت‌شده
+# لیست اعضا + امتیاز
 # =====================================
 
 async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -571,74 +741,59 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    cur.execute("""
+    cur.execute(
+        """
         SELECT
-            r.id,
-            r.username,
-            r.first_name,
-            r.invited_by,
-            u.username,
-            u.first_name
-        FROM users r
-        LEFT JOIN users u
-            ON r.invited_by = u.id
-        WHERE r.joined=1
-        AND r.invited_by IS NOT NULL
-        ORDER BY r.id DESC
-    """)
+            id,
+            username,
+            first_name,
+            invited_by,
+            points,
+            joined
+        FROM users
+        ORDER BY points DESC, id DESC
+        """
+    )
 
     rows = cur.fetchall()
 
     if not rows:
 
         await update.message.reply_text(
-            "👥 هنوز عضو دعوت‌شده‌ای ثبت نشده."
+            "👥 هنوز کاربری ثبت نشده."
         )
 
         return
 
-    text = "👥 اعضای دعوت‌شده\n\n"
+    text = "👥 لیست کاربران\n\n"
 
-    for i, row in enumerate(
-        rows,
-        start=1
-    ):
+    for i, row in enumerate(rows, start=1):
 
-        member_id = row[0]
-        member_username = row[1]
-        member_first_name = row[2]
+        user_id = row[0]
+        username = row[1]
+        first_name = row[2]
+        invited_by = row[3]
+        points = row[4]
+        joined = row[5]
 
-        inviter_username = row[4]
-        inviter_first_name = row[5]
-
-        if member_username:
-
-            member_name = f"@{member_username}"
+        if username:
+            name = f"@{username}"
 
         else:
+            name = first_name or str(user_id)
 
-            member_name = (
-                member_first_name
-                or str(member_id)
-            )
-
-        if inviter_username:
-
-            inviter_name = f"@{inviter_username}"
-
-        else:
-
-            inviter_name = (
-                inviter_first_name
-                or "نامشخص"
-            )
+        status = "✅" if joined else "❌"
 
         text += (
-            f"{i}. {member_name}\n"
-            f"   🆔 ID: {member_id}\n"
-            f"   👤 دعوت‌کننده: {inviter_name}\n\n"
+            f"{i}. {name}\n"
+            f"   🆔 ID: {user_id}\n"
+            f"   📢 عضویت: {status}\n"
+            f"   ⭐ امتیاز: {points}\n"
+            f"   👥 دعوت‌کننده: "
+            f"{invited_by if invited_by else 'ندارد'}\n\n"
         )
 
+        # جلوگیری از عبور از محدودیت تلگرام
         if len(text) > 3500:
 
             await update.message.reply_text(text)
