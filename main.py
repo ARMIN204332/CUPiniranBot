@@ -37,7 +37,12 @@ REQUIRED_CHANNELS = [
     (
         "@MAN_O_2_NEWS",
         "https://t.me/MAN_O_2_NEWS",
-        "📢 عضویت در کانال",
+        "📢 عضویت در کانال اول",
+    ),
+    (
+        "@nabzegahan",
+        "https://t.me/nabzegahan",
+        "📢 عضویت در کانال دوم",
     ),
 ]
 
