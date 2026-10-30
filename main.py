@@ -1,1424 +1,533 @@
+
 import os
 import sqlite3
 import logging
-import html
+import secrets
+from datetime import datetime, timezone
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
     filters,
 )
 
-# =========================
-# CONFIG
-# =========================
+# -------------------- تنظیمات --------------------
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# آیدی عددی اکانت ادمین
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_IDS = {
+    7433705943,
+    122351848,
+    1183224377,
+    5478649107,
+}
 
-CHANNELS = [
-    (
-        "@CUPiniran",
-        "📢 کانال CUPiniran",
-        "https://t.me/CUPiniran"
-    ),
-    (
-        "@nabzegahan",
-        "📢 کانال نبض جهان",
-        "https://t.me/nabzegahan"
-    ),
+REQUIRED_CHANNELS = [
+    ("@MAN_O_2_NEWS", "https://t.me/MAN_O_2_NEWS", "عضویت در کانال اول"),
+    ("@nabzegahan", "https://t.me/nabzegahan", "عضویت در کانال دوم"),
 ]
 
-DB_FILE = "bot.db"
+DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 
-# =========================
-# DATABASE
-# =========================
+# -------------------- دیتابیس --------------------
 
-def get_db():
-    conn = sqlite3.connect(DB_FILE)
+def connect_db():
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    conn = get_db()
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            invited_by INTEGER,
-            points INTEGER DEFAULT 0,
-            joined_cup INTEGER DEFAULT 0,
-            joined_nabz INTEGER DEFAULT 0,
-            referral_rewarded INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def add_or_update_user(
-    user_id,
-    username,
-    first_name,
-    invited_by=None
-):
-    conn = get_db()
-
-    existing = conn.execute(
-        "SELECT id, invited_by FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if existing is None:
-
-        # جلوگیری از دعوت کردن خودش
-        if invited_by == user_id:
-            invited_by = None
-
+    with connect_db() as conn:
         conn.execute("""
-            INSERT INTO users
-            (id, username, first_name, invited_by)
+            CREATE TABLE IF NOT EXISTS uploader_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                file_key TEXT PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_name TEXT,
+                caption TEXT,
+                file_size INTEGER,
+                downloads INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+
+def save_user(user):
+    with connect_db() as conn:
+        conn.execute("""
+            INSERT INTO uploader_users (user_id, username, first_name, created_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name
         """, (
-            user_id,
-            username,
-            first_name,
-            invited_by,
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            datetime.now(timezone.utc).isoformat(),
         ))
+        conn.commit()
 
-    else:
 
-        # invited_by قبلی حفظ می‌شود
+def save_file(file_key, owner_id, file_id, file_type, file_name, caption, file_size):
+    with connect_db() as conn:
         conn.execute("""
-            UPDATE users
-            SET username = ?, first_name = ?
-            WHERE id = ?
+            INSERT INTO uploaded_files
+            (file_key, owner_id, file_id, file_type, file_name, caption, file_size, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            username,
-            first_name,
-            user_id,
+            file_key, owner_id, file_id, file_type, file_name or "",
+            caption or "", file_size or 0, datetime.now(timezone.utc).isoformat(),
         ))
-
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
-# =========================
-# ADMIN
-# =========================
+def find_file(file_key):
+    with connect_db() as conn:
+        return conn.execute(
+            "SELECT * FROM uploaded_files WHERE file_key = ?", (file_key,)
+        ).fetchone()
+
+
+def count_download(file_key):
+    with connect_db() as conn:
+        conn.execute(
+            "UPDATE uploaded_files SET downloads = downloads + 1 WHERE file_key = ?",
+            (file_key,),
+        )
+        conn.commit()
+
+
+def change_file_status(file_key, enabled):
+    with connect_db() as conn:
+        cur = conn.execute(
+            "UPDATE uploaded_files SET enabled = ? WHERE file_key = ?",
+            (int(enabled), file_key),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def remove_file(file_key):
+    with connect_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM uploaded_files WHERE file_key = ?", (file_key,)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def get_stats():
+    with connect_db() as conn:
+        users = conn.execute("SELECT COUNT(*) FROM uploader_users").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM uploaded_files").fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM uploaded_files WHERE enabled = 1"
+        ).fetchone()[0]
+        downloads = conn.execute(
+            "SELECT COALESCE(SUM(downloads), 0) FROM uploaded_files"
+        ).fetchone()[0]
+    return users, total, active, downloads
+
+
+def recent_files(limit=15):
+    with connect_db() as conn:
+        return conn.execute("""
+            SELECT file_key, owner_id, file_name, file_type, downloads, enabled
+            FROM uploaded_files
+            ORDER BY created_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+
+
+# -------------------- ابزارهای کمکی --------------------
 
 def is_admin(user_id):
-    return ADMIN_ID != 0 and user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 
-async def admin_only(update: Update):
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
-        if update.message:
-            await update.message.reply_text(
-                "⛔ شما اجازه دسترسی به پنل مدیریت را ندارید."
-            )
-        return False
-
+async def check_required_membership(context, user_id):
+    for channel, _, _ in REQUIRED_CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(channel, user_id)
+            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+                return False
+            if member.status == ChatMemberStatus.RESTRICTED and not member.is_member:
+                return False
+        except Exception:
+            logger.exception("Membership check failed for %s", channel)
+            return None
     return True
 
 
-# =========================
-# ADMIN MENU
-# =========================
-
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not await admin_only(update):
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📊 آمار کلی",
-                callback_data="admin_stats"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👥 لیست کاربران",
-                callback_data="admin_users"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏆 رتبه‌بندی امتیازات",
-                callback_data="admin_top"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔗 دعوت‌ها",
-                callback_data="admin_referrals"
-            )
-        ],
+def membership_keyboard(file_key):
+    rows = [
+        [InlineKeyboardButton(label, url=url)]
+        for _, url, label in REQUIRED_CHANNELS
     ]
-
-    await update.message.reply_text(
-        "🔐 پنل مدیریت\n\n"
-        "یکی از گزینه‌های زیر را انتخاب کن:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# ADMIN STATS
-# =========================
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        return
-
-    conn = get_db()
-
-    total = conn.execute(
-        "SELECT COUNT(*) AS c FROM users"
-    ).fetchone()["c"]
-
-    joined_cup = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE joined_cup = 1"
-    ).fetchone()["c"]
-
-    joined_nabz = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE joined_nabz = 1"
-    ).fetchone()["c"]
-
-    fully_joined = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-        WHERE joined_cup = 1
-        AND joined_nabz = 1
-    """).fetchone()["c"]
-
-    referral_users = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-        WHERE invited_by IS NOT NULL
-    """).fetchone()["c"]
-
-    total_points = conn.execute("""
-        SELECT COALESCE(SUM(points), 0) AS s
-        FROM users
-    """).fetchone()["s"]
-
-    conn.close()
-
-    text = (
-        "📊 <b>آمار کلی بات</b>\n\n"
-        f"👥 کل کاربران: <b>{total}</b>\n"
-        f"📢 عضو CUPiniran: <b>{joined_cup}</b>\n"
-        f"📢 عضو نبض جهان: <b>{joined_nabz}</b>\n"
-        f"✅ عضویت کامل: <b>{fully_joined}</b>\n"
-        f"🔗 کاربران دارای دعوت‌کننده: <b>{referral_users}</b>\n"
-        f"⭐ مجموع امتیازات: <b>{total_points}</b>"
-    )
-
-    keyboard = [[
+    rows.append([
         InlineKeyboardButton(
-            "🔙 پنل مدیریت",
-            callback_data="admin_home"
+            "✅ بررسی عضویت و دریافت فایل",
+            callback_data=f"getfile:{file_key}",
         )
-    ]]
-
-    await query.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
-# =========================
-# ADMIN USERS
-# =========================
+async def send_file_to_user(chat_id, row, context):
+    file_id = row["file_id"]
+    caption = row["caption"] or None
+    kind = row["file_type"]
 
-async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        return
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        ORDER BY created_at DESC
-        LIMIT 50
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        text = "👥 هنوز هیچ کاربری ثبت نشده."
+    if kind == "photo":
+        await context.bot.send_photo(chat_id, file_id, caption=caption)
+    elif kind == "video":
+        await context.bot.send_video(chat_id, file_id, caption=caption)
+    elif kind == "audio":
+        await context.bot.send_audio(chat_id, file_id, caption=caption)
+    elif kind == "voice":
+        await context.bot.send_voice(chat_id, file_id, caption=caption)
+    elif kind == "animation":
+        await context.bot.send_animation(chat_id, file_id, caption=caption)
+    elif kind == "video_note":
+        await context.bot.send_video_note(chat_id, file_id)
+        if caption:
+            await context.bot.send_message(chat_id, caption)
+    elif kind == "sticker":
+        await context.bot.send_sticker(chat_id, file_id)
     else:
-
-        lines = [
-            "👥 <b>آخرین کاربران</b>\n"
-        ]
-
-        for index, user in enumerate(users, 1):
-
-            name = html.escape(
-                user["first_name"] or "بدون نام"
-            )
-
-            username = (
-                f"@{html.escape(user['username'])}"
-                if user["username"]
-                else "بدون یوزرنیم"
-            )
-
-            inviter = (
-                str(user["invited_by"])
-                if user["invited_by"]
-                else "بدون دعوت‌کننده"
-            )
-
-            joined = "✅" if (
-                user["joined_cup"]
-                and user["joined_nabz"]
-            ) else "❌"
-
-            lines.append(
-                f"{index}. {name} | {username}\n"
-                f"🆔 <code>{user['id']}</code>\n"
-                f"🔗 دعوت‌کننده: <code>{inviter}</code>\n"
-                f"⭐ امتیاز: <b>{user['points']}</b>\n"
-                f"📢 عضویت کامل: {joined}\n"
-            )
-
-        text = "\n".join(lines)
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🔙 پنل مدیریت",
-            callback_data="admin_home"
-        )
-    ]]
-
-    await query.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# ADMIN TOP
-# =========================
-
-async def admin_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        return
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        ORDER BY points DESC, created_at ASC
-        LIMIT 50
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        text = "🏆 هنوز کاربری وجود ندارد."
-
-    else:
-
-        lines = [
-            "🏆 <b>رتبه‌بندی امتیازات</b>\n"
-        ]
-
-        medals = ["🥇", "🥈", "🥉"]
-
-        for index, user in enumerate(users, 1):
-
-            name = html.escape(
-                user["first_name"] or "بدون نام"
-            )
-
-            username = (
-                f"@{html.escape(user['username'])}"
-                if user["username"]
-                else ""
-            )
-
-            medal = (
-                medals[index - 1]
-                if index <= 3
-                else f"{index}."
-            )
-
-            lines.append(
-                f"{medal} {name} {username}\n"
-                f"🆔 <code>{user['id']}</code> "
-                f"⭐ <b>{user['points']}</b>\n"
-            )
-
-        text = "\n".join(lines)
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🔙 پنل مدیریت",
-            callback_data="admin_home"
-        )
-    ]]
-
-    await query.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# ADMIN REFERRALS
-# =========================
-
-async def admin_referrals(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        return
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT
-            u.id,
-            u.first_name,
-            u.username,
-            u.invited_by,
-            u.points,
-            u.referral_rewarded
-        FROM users u
-        WHERE u.invited_by IS NOT NULL
-        ORDER BY u.created_at DESC
-        LIMIT 50
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        text = "🔗 هنوز کسی با لینک دعوت وارد نشده."
-
-    else:
-
-        lines = [
-            "🔗 <b>لیست دعوت‌ها</b>\n"
-        ]
-
-        for index, user in enumerate(users, 1):
-
-            name = html.escape(
-                user["first_name"] or "بدون نام"
-            )
-
-            rewarded = (
-                "✅ امتیاز دعوت ثبت شده"
-                if user["referral_rewarded"]
-                else "⏳ هنوز پاداش ثبت نشده"
-            )
-
-            lines.append(
-                f"{index}. {name}\n"
-                f"🆔 کاربر: <code>{user['id']}</code>\n"
-                f"👤 دعوت‌کننده: <code>{user['invited_by']}</code>\n"
-                f"⭐ امتیاز کاربر: <b>{user['points']}</b>\n"
-                f"{rewarded}\n"
-            )
-
-        text = "\n".join(lines)
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🔙 پنل مدیریت",
-            callback_data="admin_home"
-        )
-    ]]
-
-    await query.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# ADMIN HOME CALLBACK
-# =========================
-
-async def admin_home(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-    await query.answer()
-
-    if not is_admin(query.from_user.id):
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📊 آمار کلی",
-                callback_data="admin_stats"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👥 لیست کاربران",
-                callback_data="admin_users"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏆 رتبه‌بندی امتیازات",
-                callback_data="admin_top"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔗 دعوت‌ها",
-                callback_data="admin_referrals"
-            )
-        ],
-    ]
-
-    await query.edit_message_text(
-        "🔐 <b>پنل مدیریت</b>\n\n"
-        "مدیریت کاربران و امتیازات:",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# USER SEARCH
-# =========================
-
-async def user_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not await admin_only(update):
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "مثال:\n"
-            "/user 123456789"
-        )
-        return
-
-    try:
-        user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text(
-            "❌ آیدی باید عددی باشد."
-        )
-        return
-
-    conn = get_db()
-
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not user:
-        await update.message.reply_text(
-            "❌ این کاربر در دیتابیس پیدا نشد."
-        )
-        return
-
-    name = html.escape(
-        user["first_name"] or "بدون نام"
-    )
-
-    username = (
-        f"@{html.escape(user['username'])}"
-        if user["username"]
-        else "بدون یوزرنیم"
-    )
-
-    inviter = (
-        str(user["invited_by"])
-        if user["invited_by"]
-        else "ندارد"
-    )
-
-    text = (
-        "👤 <b>اطلاعات کاربر</b>\n\n"
-        f"نام: {name}\n"
-        f"یوزرنیم: {username}\n"
-        f"🆔 ID: <code>{user['id']}</code>\n"
-        f"⭐ امتیاز: <b>{user['points']}</b>\n"
-        f"🔗 دعوت‌کننده: <code>{inviter}</code>\n"
-        f"📢 CUPiniran: "
-        f"{'✅' if user['joined_cup'] else '❌'}\n"
-        f"📢 نبض جهان: "
-        f"{'✅' if user['joined_nabz'] else '❌'}\n"
-        f"🎁 پاداش دعوت: "
-        f"{'✅' if user['referral_rewarded'] else '❌'}\n"
-        f"🕐 ثبت: {user['created_at']}"
-    )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML"
-    )
-
-
-# =========================
-# MEMBERSHIP
-# =========================
-
-async def check_channel_membership(
-    bot,
-    user_id,
-    channel
-):
-
-    try:
-
-        member = await bot.get_chat_member(
-            chat_id=channel,
-            user_id=user_id
-        )
-
-        return member.status in (
-            "member",
-            "administrator",
-            "creator",
-        )
-
-    except Exception as e:
-
-        logger.warning(
-            "Membership check failed for %s in %s: %s",
-            user_id,
-            channel,
-            e,
-        )
-
-        return False
-
-
-async def check_all_memberships(bot, user_id):
-
-    cup = await check_channel_membership(
-        bot,
-        user_id,
-        "@CUPiniran"
-    )
-
-    nabz = await check_channel_membership(
-        bot,
-        user_id,
-        "@nabzegahan"
-    )
-
-    return cup, nabz
-
-
-# =========================
-# START
-# =========================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+        await context.bot.send_document(chat_id, file_id, caption=caption)
+
+
+def get_media(message):
+    if message.document:
+        m = message.document
+        return "document", m.file_id, m.file_name or "file", m.file_size
+    if message.photo:
+        m = message.photo[-1]
+        return "photo", m.file_id, "photo.jpg", m.file_size
+    if message.video:
+        m = message.video
+        return "video", m.file_id, m.file_name or "video.mp4", m.file_size
+    if message.audio:
+        m = message.audio
+        return "audio", m.file_id, m.file_name or "audio", m.file_size
+    if message.voice:
+        m = message.voice
+        return "voice", m.file_id, "voice.ogg", m.file_size
+    if message.animation:
+        m = message.animation
+        return "animation", m.file_id, m.file_name or "animation.gif", m.file_size
+    if message.video_note:
+        m = message.video_note
+        return "video_note", m.file_id, "video_note.mp4", m.file_size
+    if message.sticker:
+        m = message.sticker
+        return "sticker", m.file_id, "sticker", None
+    return None
+
+
+# -------------------- کاربران و دریافت فایل --------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    save_user(user)
 
-    if not user:
-        return
+    if context.args and context.args[0].startswith("file_"):
+        file_key = context.args[0][5:]
+        row = find_file(file_key)
 
-    invited_by = None
+        if row is None or not row["enabled"]:
+            await update.message.reply_text("این لینک معتبر نیست یا فایل غیرفعال شده است.")
+            return
 
-    if context.args:
+        if not is_admin(user.id):
+            membership = await check_required_membership(context, user.id)
+            if membership is False:
+                await update.message.reply_text(
+                    "برای دریافت این فایل باید عضو هر دو کانال زیر باشی:",
+                    reply_markup=membership_keyboard(file_key),
+                )
+                return
+            if membership is None:
+                await update.message.reply_text(
+                    "در حال حاضر بررسی عضویت ممکن نیست. لطفاً کمی بعد دوباره تلاش کن."
+                )
+                return
 
         try:
-            invited_by = int(context.args[0])
-
-        except ValueError:
-            invited_by = None
-
-    add_or_update_user(
-        user.id,
-        user.username,
-        user.first_name,
-        invited_by,
-    )
-
-    keyboard = []
-
-    for _, title, url in CHANNELS:
-
-        keyboard.append([
-            InlineKeyboardButton(
-                title,
-                url=url
-            )
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "✅ بررسی عضویت",
-            callback_data="check_membership"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "🏆 امتیاز من",
-            callback_data="my_points"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "👥 دعوت دوستان",
-            callback_data="invite"
-        )
-    ])
-
-    text = (
-        f"سلام {user.first_name} 👋\n\n"
-        "به ربات خوش آمدی.\n\n"
-        "برای فعال شدن حساب امتیازی، ابتدا "
-        "در کانال‌های زیر عضو شو:\n\n"
-        "📢 CUPiniran\n"
-        "📢 نبض جهان\n\n"
-        "بعد از عضویت روی «بررسی عضویت» بزن."
-    )
-
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# MEMBERSHIP CHECK
-# =========================
-
-async def check_membership(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = query.from_user
-
-    cup, nabz = await check_all_memberships(
-        context.bot,
-        user.id
-    )
-
-    conn = get_db()
-
-    row = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user.id,)
-    ).fetchone()
-
-    if row is None:
-
-        conn.close()
+            await send_file_to_user(update.effective_chat.id, row, context)
+            count_download(file_key)
+        except Exception:
+            logger.exception("Failed to send file key=%s", file_key)
+            await update.message.reply_text("ارسال فایل با خطا مواجه شد. لطفاً دوباره تلاش کن.")
         return
 
-    old_cup = row["joined_cup"]
-    old_nabz = row["joined_nabz"]
-
-    conn.execute("""
-        UPDATE users
-        SET joined_cup = ?, joined_nabz = ?
-        WHERE id = ?
-    """, (
-        1 if cup else 0,
-        1 if nabz else 0,
-        user.id,
-    ))
-
-    # امتیاز عضویت CUP
-    if cup and not old_cup:
-
-        conn.execute("""
-            UPDATE users
-            SET points = points + 1
-            WHERE id = ?
-        """, (user.id,))
-
-    # امتیاز عضویت نبض
-    if nabz and not old_nabz:
-
-        conn.execute("""
-            UPDATE users
-            SET points = points + 1
-            WHERE id = ?
-        """, (user.id,))
-
-    conn.commit()
-
-    # =====================
-    # REFERRAL REWARD
-    # =====================
-
-    row = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user.id,)
-    ).fetchone()
-
-    if (
-        cup
-        and nabz
-        and row["invited_by"]
-        and row["referral_rewarded"] == 0
-        and row["invited_by"] != user.id
-    ):
-
-        inviter = row["invited_by"]
-
-        inviter_exists = conn.execute(
-            "SELECT id FROM users WHERE id = ?",
-            (inviter,)
-        ).fetchone()
-
-        if inviter_exists:
-
-            conn.execute("""
-                UPDATE users
-                SET points = points + 1
-                WHERE id = ?
-            """, (inviter,))
-
-            conn.execute("""
-                UPDATE users
-                SET referral_rewarded = 1
-                WHERE id = ?
-            """, (user.id,))
-
-    conn.commit()
-
-    final_row = conn.execute(
-        "SELECT points FROM users WHERE id = ?",
-        (user.id,)
-    ).fetchone()
-
-    conn.close()
-
-    points = final_row["points"]
-
-    if cup and nabz:
-
-        text = (
-            "✅ عضویت شما با موفقیت تأیید شد!\n\n"
-            "🏆 سیستم امتیازدهی برای شما فعال است.\n\n"
-            f"⭐ امتیاز فعلی: {points}"
+    if is_admin(user.id):
+        await update.message.reply_text(
+            "سلام ادمین!\nفایل را همین‌جا ارسال کن تا لینک اختصاصی آن ساخته شود.\n"
+            "برای مدیریت ربات /admin را بزن."
         )
-
     else:
-
-        missing = []
-
-        if not cup:
-            missing.append("📢 CUPiniran")
-
-        if not nabz:
-            missing.append("📢 نبض جهان")
-
-        text = (
-            "❌ عضویت کامل تأیید نشد.\n\n"
-            "لطفاً در این کانال‌ها عضو شوید:\n\n"
-            + "\n".join(missing)
-            + "\n\n"
-            "سپس دوباره «بررسی عضویت» را بزنید."
+        await update.message.reply_text(
+            "سلام!\nبرای دریافت فایل، لینک اختصاصی آن را باز کن.\n"
+            "برای آپلود فایل فقط ادمین‌های ربات دسترسی دارند."
         )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🔄 بررسی دوباره",
-                callback_data="check_membership"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏆 امتیاز من",
-                callback_data="my_points"
-            )
-        ],
-    ]
 
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# POINTS
-# =========================
-
-async def my_points(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = query.from_user
-
-    conn = get_db()
-
-    row = conn.execute(
-        "SELECT points FROM users WHERE id = ?",
-        (user.id,)
-    ).fetchone()
-
-    conn.close()
-
-    points = row["points"] if row else 0
-
-    text = (
-        "🏆 امتیازات شما\n\n"
-        f"⭐ امتیاز فعلی: {points}\n\n"
-        "روش‌های دریافت امتیاز:\n"
-        "📢 عضویت موفق در هر کانال: ۱ امتیاز\n"
-        "👥 دعوت موفق هر نفر: ۱ امتیاز"
-    )
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "👥 دعوت دوستان",
-                callback_data="invite"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="back_home"
-            )
-        ],
-    ]
-
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# REFERRAL
-# =========================
-
-async def invite(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = query.from_user
-
-    bot_username = context.bot.username
-
-    referral_link = (
-        f"https://t.me/{bot_username}?start={user.id}"
-    )
-
-    text = (
-        "👥 دعوت دوستان\n\n"
-        "لینک اختصاصی دعوت شما:\n\n"
-        f"{referral_link}\n\n"
-        "هر کاربری که از لینک شما وارد شود، "
-        "در هر دو کانال عضو شود و عضویتش را تأیید کند، "
-        "برای شما ۱ امتیاز ثبت می‌شود. ⭐"
-    )
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🔙 بازگشت",
-            callback_data="back_home"
-        )
-    ]]
-
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# HOME
-# =========================
-
-async def back_home(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    keyboard = []
-
-    for _, title, url in CHANNELS:
-
-        keyboard.append([
-            InlineKeyboardButton(
-                title,
-                url=url
-            )
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "✅ بررسی عضویت",
-            callback_data="check_membership"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "🏆 امتیاز من",
-            callback_data="my_points"
-        )
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton(
-            "👥 دعوت دوستان",
-            callback_data="invite"
-        )
-    ])
-
-    text = (
-        f"سلام {query.from_user.first_name} 👋\n\n"
-        "به منوی اصلی برگشتی."
-    )
-
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# TEXT ADMIN COMMANDS
-# =========================
-
-async def admin_text_commands(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
+async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    save_user(user)
 
-    if not user or not is_admin(user.id):
+    if not is_admin(user.id):
+        await update.effective_message.reply_text("آپلود فایل فقط برای ادمین‌های ربات فعال است.")
         return
 
-    text = update.message.text.strip().lower()
+    media = get_media(update.effective_message)
+    if not media:
+        return
 
-    if text == "admin":
-        await admin(update, context)
+    file_type, file_id, file_name, file_size = media
+    caption = update.effective_message.caption or ""
+    file_key = secrets.token_urlsafe(10).replace("-", "").replace("_", "")[:13]
 
-    elif text in ("stats", "stast"):
-        await admin_stats_direct(update, context)
+    try:
+        save_file(
+            file_key, user.id, file_id, file_type,
+            file_name, caption, file_size,
+        )
+        me = await context.bot.get_me()
+        link = f"https://t.me/{me.username}?start=file_{file_key}"
+        await update.effective_message.reply_text(
+            "✅ فایل با موفقیت ثبت شد.\n\n"
+            f"نام فایل: {file_name}\n"
+            f"لینک اختصاصی:\n{link}\n\n"
+            "برای دریافت فایل، کاربران باید عضو هر دو کانال اجباری باشند."
+        )
+    except Exception:
+        logger.exception("Failed to store uploaded file")
+        await update.effective_message.reply_text("ثبت فایل با خطا مواجه شد.")
 
-    elif text == "users":
-        await admin_users_direct(update, context)
 
-    elif text == "top":
-        await admin_top_direct(update, context)
+async def membership_check_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    elif text == "referrals":
-        await admin_referrals_direct(update, context)
+    if not query.data.startswith("getfile:"):
+        return
+
+    file_key = query.data.split(":", 1)[1]
+    row = find_file(file_key)
+    if row is None or not row["enabled"]:
+        await query.edit_message_text("این لینک معتبر نیست یا فایل غیرفعال شده است.")
+        return
+
+    if not is_admin(query.from_user.id):
+        membership = await check_required_membership(context, query.from_user.id)
+        if membership is False:
+            await query.answer("هنوز عضو هر دو کانال نشده‌ای.", show_alert=True)
+            return
+        if membership is None:
+            await query.answer("فعلاً بررسی عضویت ممکن نیست؛ بعداً دوباره تلاش کن.", show_alert=True)
+            return
+
+    try:
+        await query.edit_message_text("✅ عضویت تأیید شد؛ فایل در پیام بعدی ارسال می‌شود.")
+        await send_file_to_user(query.message.chat_id, row, context)
+        count_download(file_key)
+    except Exception:
+        logger.exception("Failed to deliver file after membership check")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="ارسال فایل با خطا مواجه شد. دوباره تلاش کن.",
+        )
 
 
-# =========================
-# DIRECT ADMIN COMMAND VERSIONS
-# =========================
+# -------------------- پنل ادمین --------------------
 
-async def admin_stats_direct(update, context):
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("شما دسترسی مدیریت ندارید.")
+        return
 
-    conn = get_db()
-
-    total = conn.execute(
-        "SELECT COUNT(*) AS c FROM users"
-    ).fetchone()["c"]
-
-    cup = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE joined_cup=1"
-    ).fetchone()["c"]
-
-    nabz = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE joined_nabz=1"
-    ).fetchone()["c"]
-
-    full = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-        WHERE joined_cup=1 AND joined_nabz=1
-    """).fetchone()["c"]
-
-    referrals = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM users
-        WHERE invited_by IS NOT NULL
-    """).fetchone()["c"]
-
-    points = conn.execute("""
-        SELECT COALESCE(SUM(points),0) AS s
-        FROM users
-    """).fetchone()["s"]
-
-    conn.close()
-
+    keyboard = [
+        [InlineKeyboardButton("📊 آمار ربات", callback_data="admin:stats")],
+        [InlineKeyboardButton("🗂 فایل‌های اخیر", callback_data="admin:files")],
+    ]
     await update.message.reply_text(
-        "📊 آمار کلی\n\n"
-        f"👥 کل کاربران: {total}\n"
-        f"📢 CUPiniran: {cup}\n"
-        f"📢 نبض جهان: {nabz}\n"
-        f"✅ عضویت کامل: {full}\n"
-        f"🔗 دارای دعوت‌کننده: {referrals}\n"
-        f"⭐ مجموع امتیازات: {points}"
+        "پنل مدیریت\n\n"
+        "دستورها:\n"
+        "/stats - آمار کلی\n"
+        "/files - فایل‌های اخیر\n"
+        "/disable KEY - غیرفعال‌کردن لینک\n"
+        "/enable KEY - فعال‌کردن لینک\n"
+        "/delete_file KEY - حذف فایل",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def admin_users_direct(update, context):
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        ORDER BY created_at DESC
-        LIMIT 30
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        await update.message.reply_text(
-            "👥 هنوز کاربری ثبت نشده."
-        )
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("شما دسترسی مدیریت ندارید.")
         return
 
-    lines = ["👥 آخرین کاربران:\n"]
+    users, total, active, downloads = get_stats()
+    await update.message.reply_text(
+        "📊 آمار ربات\n\n"
+        f"کاربران ثبت‌شده: {users}\n"
+        f"کل فایل‌ها: {total}\n"
+        f"لینک‌های فعال: {active}\n"
+        f"تعداد دریافت موفق: {downloads}"
+    )
 
-    for i, user in enumerate(users, 1):
 
-        name = user["first_name"] or "بدون نام"
+async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("شما دسترسی مدیریت ندارید.")
+        return
 
-        inviter = (
-            str(user["invited_by"])
-            if user["invited_by"]
-            else "ندارد"
-        )
+    rows = recent_files()
+    if not rows:
+        await update.message.reply_text("هنوز فایلی ثبت نشده است.")
+        return
 
+    lines = ["🗂 فایل‌های اخیر"]
+    for row in rows:
+        status = "فعال" if row["enabled"] else "غیرفعال"
         lines.append(
-            f"{i}. {name}\n"
-            f"🆔 {user['id']}\n"
-            f"🔗 دعوت‌کننده: {inviter}\n"
-            f"⭐ امتیاز: {user['points']}\n"
-            f"📅 {user['created_at']}\n"
+            f"\nکلید: {row['file_key']}\n"
+            f"نام: {row['file_name'] or '-'}\n"
+            f"نوع: {row['file_type']} | دریافت: {row['downloads']} | {status}\n"
+            f"آپلودکننده: {row['owner_id']}"
         )
-
-    await update.message.reply_text(
-        "\n".join(lines)
-    )
+    await update.message.reply_text("\n".join(lines))
 
 
-async def admin_top_direct(update, context):
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        ORDER BY points DESC, created_at ASC
-        LIMIT 30
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        await update.message.reply_text(
-            "🏆 کاربری وجود ندارد."
-        )
+async def file_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("شما دسترسی مدیریت ندارید.")
         return
 
-    lines = ["🏆 رتبه‌بندی:\n"]
-
-    for i, user in enumerate(users, 1):
-
-        name = user["first_name"] or "بدون نام"
-
-        lines.append(
-            f"{i}. {name}\n"
-            f"🆔 {user['id']}\n"
-            f"⭐ {user['points']} امتیاز\n"
-        )
-
-    await update.message.reply_text(
-        "\n".join(lines)
-    )
-
-
-async def admin_referrals_direct(update, context):
-
-    conn = get_db()
-
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        WHERE invited_by IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 30
-    """).fetchall()
-
-    conn.close()
-
-    if not users:
-        await update.message.reply_text(
-            "🔗 هنوز دعوتی ثبت نشده."
-        )
+    command = update.message.text.split()[0].split("@")[0].lower()
+    if not context.args:
+        await update.message.reply_text("کلید فایل را وارد کن. مثال: /disable ABC123")
         return
 
-    lines = ["🔗 دعوت‌ها:\n"]
+    file_key = context.args[0].strip()
+    if command == "/disable":
+        ok = change_file_status(file_key, False)
+        result = "لینک غیرفعال شد." if ok else "فایلی با این کلید پیدا نشد."
+    elif command == "/enable":
+        ok = change_file_status(file_key, True)
+        result = "لینک فعال شد." if ok else "فایلی با این کلید پیدا نشد."
+    else:
+        ok = remove_file(file_key)
+        result = "فایل از دیتابیس حذف شد." if ok else "فایلی با این کلید پیدا نشد."
 
-    for i, user in enumerate(users, 1):
+    await update.message.reply_text(result)
 
-        name = user["first_name"] or "بدون نام"
 
-        reward = (
-            "✅ پاداش ثبت شده"
-            if user["referral_rewarded"]
-            else "⏳ پاداش ثبت نشده"
+async def admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("شما دسترسی مدیریت ندارید.")
+        return
+
+    if query.data == "admin:stats":
+        users, total, active, downloads = get_stats()
+        await query.edit_message_text(
+            "📊 آمار ربات\n\n"
+            f"کاربران ثبت‌شده: {users}\n"
+            f"کل فایل‌ها: {total}\n"
+            f"لینک‌های فعال: {active}\n"
+            f"تعداد دریافت موفق: {downloads}"
         )
+    elif query.data == "admin:files":
+        rows = recent_files()
+        if not rows:
+            await query.edit_message_text("هنوز فایلی ثبت نشده است.")
+            return
+        lines = ["🗂 فایل‌های اخیر"]
+        for row in rows:
+            status = "فعال" if row["enabled"] else "غیرفعال"
+            lines.append(
+                f"\n{row['file_key']} | {row['file_name'] or '-'}\n"
+                f"{row['file_type']} | دریافت: {row['downloads']} | {status}"
+            )
+        await query.edit_message_text("\n".join(lines))
 
-        lines.append(
-            f"{i}. {name}\n"
-            f"🆔 {user['id']}\n"
-            f"👤 دعوت‌کننده: {user['invited_by']}\n"
-            f"{reward}\n"
-        )
 
-    await update.message.reply_text(
-        "\n".join(lines)
-    )
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception while processing update", exc_info=context.error)
 
 
-# =========================
-# MAIN
-# =========================
+# -------------------- اجرای ربات --------------------
 
 def main():
-
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN environment variable is not set."
-        )
-
-    if ADMIN_ID == 0:
-        raise RuntimeError(
-            "ADMIN_ID environment variable is not set."
+            "متغیر محیطی BOT_TOKEN تنظیم نشده است. توکن را در Environment Variables هاست قرار بده."
         )
 
     init_db()
 
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("files", files_command))
+    app.add_handler(CommandHandler(
+        ["disable", "enable", "delete_file"], file_admin_action
+    ))
+
+    app.add_handler(CallbackQueryHandler(
+        membership_check_button, pattern=r"^getfile:"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        admin_button, pattern=r"^admin:"
+    ))
+
+    media_filter = (
+        filters.Document.ALL
+        | filters.PHOTO
+        | filters.VIDEO
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.ANIMATION
+        | filters.VIDEO_NOTE
+        | filters.Sticker.ALL
     )
+    app.add_handler(MessageHandler(media_filter & ~filters.COMMAND, upload_file))
+    app.add_error_handler(error_handler)
 
-    # =====================
-    # USER COMMANDS
-    # =====================
-
-    application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        CommandHandler("user", user_command)
-    )
-
-    # =====================
-    # ADMIN COMMANDS
-    # =====================
-
-    application.add_handler(
-        CommandHandler("admin", admin)
-    )
-
-    application.add_handler(
-        CommandHandler("stats", admin_stats_direct)
-    )
-
-    application.add_handler(
-        CommandHandler("users", admin_users_direct)
-    )
-
-    application.add_handler(
-        CommandHandler("top", admin_top_direct)
-    )
-
-    application.add_handler(
-        CommandHandler("referrals", admin_referrals_direct)
-    )
-
-    # =====================
-    # CALLBACKS
-    # =====================
-
-    application.add_handler(
-        CallbackQueryHandler(
-            check_membership,
-            pattern="^check_membership$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            my_points,
-            pattern="^my_points$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            invite,
-            pattern="^invite$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            back_home,
-            pattern="^back_home$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_home,
-            pattern="^admin_home$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_stats,
-            pattern="^admin_stats$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_users,
-            pattern="^admin_users$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_top,
-            pattern="^admin_top$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_referrals,
-            pattern="^admin_referrals$"
-        )
-    )
-
-    # =====================
-    # PLAIN TEXT ADMIN
-    # =====================
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            admin_text_commands
-        )
-    )
-
-    logger.info("Bot is starting...")
-
-    application.run_polling(
-        drop_pending_updates=True
-    )
+    logger.info("File uploader bot is starting...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
