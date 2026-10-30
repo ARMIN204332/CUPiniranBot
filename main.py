@@ -1,13 +1,15 @@
 
 import os
 import sqlite3
-import logging
 import secrets
-from datetime import datetime, timezone
+import logging
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ChatMemberStatus
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,14 +19,10 @@ from telegram.ext import (
     filters,
 )
 
-# ==================================================
-# تنظیمات
-# ==================================================
+# ---------------- CONFIG ----------------
 
 load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-DB_PATH = os.getenv("DB_PATH", "bot.db")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS = {
     7433705943,
@@ -46,395 +44,168 @@ REQUIRED_CHANNELS = [
     ),
 ]
 
+DB_NAME = "bot.db"
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 
-# ==================================================
-# دیتابیس
-# ==================================================
+# ---------------- DATABASE ----------------
 
-def connect_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def db_connect():
+    return sqlite3.connect(DB_NAME)
 
 
 def init_db():
-    with connect_db() as conn:
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS uploader_users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS uploaded_files (
+    with db_connect() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS files (
                 file_key TEXT PRIMARY KEY,
-                owner_id INTEGER NOT NULL,
-                file_id TEXT NOT NULL,
-                file_type TEXT NOT NULL,
+                admin_id INTEGER NOT NULL,
+                source_chat_id INTEGER NOT NULL,
+                source_message_id INTEGER NOT NULL,
                 file_name TEXT,
-                caption TEXT,
-                file_size INTEGER,
-                downloads INTEGER NOT NULL DEFAULT 0,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
-        conn.commit()
-
-
-def save_user(user):
-    with connect_db() as conn:
-        conn.execute("""
-            INSERT INTO uploader_users
-            (user_id, username, first_name, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name
-        """, (
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            datetime.now(timezone.utc).isoformat(),
-        ))
-
-        conn.commit()
-
-
-def save_file(
-    file_key,
-    owner_id,
-    file_id,
-    file_type,
-    file_name,
-    caption,
-    file_size
-):
-    with connect_db() as conn:
-        conn.execute("""
-            INSERT INTO uploaded_files (
-                file_key,
-                owner_id,
-                file_id,
-                file_type,
-                file_name,
-                caption,
-                file_size,
-                created_at
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            file_key,
-            owner_id,
-            file_id,
-            file_type,
-            file_name or "",
-            caption or "",
-            file_size or 0,
-            datetime.now(timezone.utc).isoformat(),
-        ))
-
-        conn.commit()
+        """)
 
 
-def find_file(file_key):
-    with connect_db() as conn:
-        return conn.execute(
-            "SELECT * FROM uploaded_files WHERE file_key = ?",
-            (file_key,)
-        ).fetchone()
-
-
-def count_download(file_key):
-    with connect_db() as conn:
-        conn.execute("""
-            UPDATE uploaded_files
-            SET downloads = downloads + 1
-            WHERE file_key = ?
-        """, (file_key,))
-
-        conn.commit()
-
-
-def change_file_status(file_key, enabled):
-    with connect_db() as conn:
-        cur = conn.execute("""
-            UPDATE uploaded_files
-            SET enabled = ?
-            WHERE file_key = ?
-        """, (int(enabled), file_key))
-
-        conn.commit()
-        return cur.rowcount > 0
-
-
-def remove_file(file_key):
-    with connect_db() as conn:
-        cur = conn.execute(
-            "DELETE FROM uploaded_files WHERE file_key = ?",
-            (file_key,)
+def save_user(user_id):
+    with db_connect() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,),
         )
 
-        conn.commit()
-        return cur.rowcount > 0
+
+def save_file(file_key, admin_id, chat_id, message_id, file_name):
+    with db_connect() as db:
+        db.execute("""
+            INSERT INTO files (
+                file_key, admin_id, source_chat_id,
+                source_message_id, file_name
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            file_key,
+            admin_id,
+            chat_id,
+            message_id,
+            file_name,
+        ))
 
 
-def get_stats():
-    with connect_db() as conn:
-
-        users = conn.execute(
-            "SELECT COUNT(*) FROM uploader_users"
-        ).fetchone()[0]
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM uploaded_files"
-        ).fetchone()[0]
-
-        active = conn.execute("""
-            SELECT COUNT(*) FROM uploaded_files
-            WHERE enabled = 1
-        """).fetchone()[0]
-
-        downloads = conn.execute("""
-            SELECT COALESCE(SUM(downloads), 0)
-            FROM uploaded_files
-        """).fetchone()[0]
-
-    return users, total, active, downloads
+def get_file(file_key):
+    with db_connect() as db:
+        return db.execute("""
+            SELECT file_key, admin_id, source_chat_id,
+                   source_message_id, file_name, active
+            FROM files
+            WHERE file_key = ?
+        """, (file_key,)).fetchone()
 
 
-def recent_files(limit=15):
-    with connect_db() as conn:
-        return conn.execute("""
-            SELECT
-                file_key,
-                owner_id,
-                file_name,
-                file_type,
-                downloads,
-                enabled
-            FROM uploaded_files
+def get_all_files():
+    with db_connect() as db:
+        return db.execute("""
+            SELECT file_key, file_name, active
+            FROM files
             ORDER BY created_at DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
+        """).fetchall()
 
 
-# ==================================================
-# ابزارهای کمکی
-# ==================================================
+# ---------------- HELPERS ----------------
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-def make_membership_keyboard(file_key):
-    rows = []
+def get_file_name(message):
+    if message.document:
+        return message.document.file_name or "Document"
+    if message.video:
+        return message.video.file_name or "Video"
+    if message.audio:
+        return message.audio.file_name or "Audio"
+    if message.photo:
+        return "Photo"
+    if message.animation:
+        return "Animation"
+    if message.voice:
+        return "Voice"
+    if message.video_note:
+        return "Video note"
+    if message.sticker:
+        return "Sticker"
+    return "Telegram media"
 
-    for _, url, label in REQUIRED_CHANNELS:
-        rows.append([
-            InlineKeyboardButton(label, url=url)
-        ])
 
-    rows.append([
-        InlineKeyboardButton(
-            "✅ بررسی عضویت و دریافت فایل",
-            callback_data=f"getfile:{file_key}"
-        )
-    ])
-
-    return InlineKeyboardMarkup(rows)
-
-
-# ==================================================
-# بررسی عضویت
-# ==================================================
-
-async def check_required_membership(context, user_id):
-
+async def check_required_membership(bot, user_id):
     for channel, _, _ in REQUIRED_CHANNELS:
-
         try:
-            logger.info(
-                "Starting membership check: channel=%s user_id=%s",
-                channel,
-                user_id
-            )
-
-            member = await context.bot.get_chat_member(
+            member = await bot.get_chat_member(
                 chat_id=channel,
-                user_id=user_id
+                user_id=user_id,
             )
 
-            status = member.status
-
-            logger.info(
-                "Membership result: channel=%s user_id=%s status=%s",
-                channel,
-                user_id,
-                status
-            )
-
-            if status in (
-                ChatMemberStatus.LEFT,
-                ChatMemberStatus.BANNED
-            ):
-                return False
-
-            if (
-                status == ChatMemberStatus.RESTRICTED
-                and not member.is_member
-            ):
+            if member.status in ("left", "kicked"):
+                logger.info(
+                    "User %s is not a member of %s",
+                    user_id,
+                    channel,
+                )
                 return False
 
         except Exception:
             logger.exception(
-                "MEMBERSHIP API ERROR: channel=%s user_id=%s",
+                "Membership check failed: channel=%s user_id=%s",
                 channel,
-                user_id
+                user_id,
             )
-
-            return None
+            return False
 
     return True
 
 
-# ==================================================
-# ارسال فایل
-# ==================================================
+def membership_keyboard(file_key):
+    buttons = []
 
-async def send_file_to_user(chat_id, row, context):
+    for _, url, label in REQUIRED_CHANNELS:
+        buttons.append([
+            InlineKeyboardButton(label, url=url)
+        ])
 
-    file_id = row["file_id"]
-    caption = row["caption"] or None
-    kind = row["file_type"]
-
-    if kind == "photo":
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=file_id,
-            caption=caption
+    buttons.append([
+        InlineKeyboardButton(
+            "✅ بررسی عضویت و دریافت فایل",
+            callback_data=f"check:{file_key}",
         )
+    ])
 
-    elif kind == "video":
-        await context.bot.send_video(
-            chat_id=chat_id,
-            video=file_id,
-            caption=caption
-        )
-
-    elif kind == "audio":
-        await context.bot.send_audio(
-            chat_id=chat_id,
-            audio=file_id,
-            caption=caption
-        )
-
-    elif kind == "voice":
-        await context.bot.send_voice(
-            chat_id=chat_id,
-            voice=file_id,
-            caption=caption
-        )
-
-    elif kind == "animation":
-        await context.bot.send_animation(
-            chat_id=chat_id,
-            animation=file_id,
-            caption=caption
-        )
-
-    elif kind == "video_note":
-        await context.bot.send_video_note(
-            chat_id=chat_id,
-            video_note=file_id
-        )
-
-        if caption:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=caption
-            )
-
-    elif kind == "sticker":
-        await context.bot.send_sticker(
-            chat_id=chat_id,
-            sticker=file_id
-        )
-
-    else:
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=file_id,
-            caption=caption
-        )
+    return InlineKeyboardMarkup(buttons)
 
 
-# ==================================================
-# تشخیص فایل ارسالی
-# ==================================================
-
-def get_media(message):
-
-    if message.document:
-        m = message.document
-        return "document", m.file_id, m.file_name or "file", m.file_size
-
-    if message.photo:
-        m = message.photo[-1]
-        return "photo", m.file_id, "photo.jpg", m.file_size
-
-    if message.video:
-        m = message.video
-        return "video", m.file_id, m.file_name or "video.mp4", m.file_size
-
-    if message.audio:
-        m = message.audio
-        return "audio", m.file_id, m.file_name or "audio", m.file_size
-
-    if message.voice:
-        m = message.voice
-        return "voice", m.file_id, "voice.ogg", m.file_size
-
-    if message.animation:
-        m = message.animation
-        return "animation", m.file_id, m.file_name or "animation.gif", m.file_size
-
-    if message.video_note:
-        m = message.video_note
-        return "video_note", m.file_id, "video_note.mp4", m.file_size
-
-    if message.sticker:
-        m = message.sticker
-        return "sticker", m.file_id, "sticker", None
-
-    return None
-
-
-# ==================================================
-# دستور شروع
-# ==================================================
+# ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     user = update.effective_user
-
-    if not user or not update.message:
+    if not user:
         return
 
-    save_user(user)
+    save_user(user.id)
 
+    # /start معمولی هیچ پیامی ارسال نمی‌کند
     if not context.args:
         return
 
@@ -443,414 +214,282 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not argument.startswith("file_"):
         return
 
-    file_key = argument[5:]
-    row = find_file(file_key)
+    file_key = argument.replace("file_", "", 1)
+    file_data = get_file(file_key)
 
-    if row is None or not row["enabled"]:
+    if not file_data or not file_data[5]:
         await update.message.reply_text(
-            "این لینک معتبر نیست یا فایل غیرفعال شده است."
+            "❌ این لینک معتبر نیست یا غیرفعال شده است."
         )
         return
 
-    if not is_admin(user.id):
-
-        membership = await check_required_membership(
-            context,
-            user.id
-        )
-
-        if membership is False:
-
-            await update.message.reply_text(
-                "برای دریافت فایل ابتدا باید عضو کانال زیر شوی:",
-                reply_markup=make_membership_keyboard(file_key)
-            )
-
-            return
-
-        if membership is None:
-
-            await update.message.reply_text(
-                "در حال حاضر بررسی عضویت ممکن نیست. "
-                "لطفاً کمی بعد دوباره تلاش کن."
-            )
-
-            return
-
-    try:
-
+    # ادمین‌ها بدون بررسی عضویت فایل را دریافت می‌کنند
+    if is_admin(user.id):
         await send_file_to_user(
-            update.effective_chat.id,
-            row,
-            context
+            context,
+            user.id,
+            file_data[2],
+            file_data[3],
         )
+        return
 
-        count_download(file_key)
+    await update.message.reply_text(
+        "برای دریافت فایل، ابتدا عضو هر دو کانال زیر شو و بعد دکمه بررسی عضویت رو بزن:",
+        reply_markup=membership_keyboard(file_key),
+    )
 
+
+# ---------------- SEND FILE ----------------
+
+async def send_file_to_user(
+    context,
+    user_id,
+    source_chat_id,
+    source_message_id,
+):
+    try:
+        await context.bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=source_chat_id,
+            message_id=source_message_id,
+        )
     except Exception:
+        logger.exception("Could not send file to user %s", user_id)
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ ارسال فایل با مشکل مواجه شد. لطفاً بعداً دوباره امتحان کن.",
+            )
+        except Exception:
+            pass
 
-        logger.exception(
-            "File delivery failed: key=%s",
-            file_key
+
+# ---------------- MEMBERSHIP CALLBACK ----------------
+
+async def check_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    file_key = query.data.split(":", 1)[1]
+
+    file_data = get_file(file_key)
+
+    if not file_data or not file_data[5]:
+        await query.edit_message_text(
+            "❌ این لینک معتبر نیست یا غیرفعال شده است."
+        )
+        return
+
+    if not is_admin(user_id):
+        is_member = await check_required_membership(
+            context.bot,
+            user_id,
         )
 
-        await update.message.reply_text(
-            "ارسال فایل با خطا مواجه شد. لطفاً دوباره تلاش کن."
-        )
+        if not is_member:
+            await query.answer(
+                "هنوز عضویت هر دو کانال تأیید نشده است.",
+                show_alert=True,
+            )
+            return
+
+    await query.edit_message_text(
+        "✅ عضویت تأیید شد. فایل در حال ارسال است..."
+    )
+
+    await send_file_to_user(
+        context,
+        user_id,
+        file_data[2],
+        file_data[3],
+    )
 
 
-# ==================================================
-# آپلود فایل توسط ادمین
-# ==================================================
+# ---------------- ADMIN UPLOAD ----------------
 
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_upload(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = update.effective_user
+    message = update.effective_message
 
+    if not user or not message:
+        return
+
+    # کاربران عادی کاملاً نادیده گرفته می‌شوند
+    if not is_admin(user.id):
+        return
+
+    file_key = secrets.token_urlsafe(8)
+    file_name = get_file_name(message)
+
+    save_file(
+        file_key,
+        user.id,
+        message.chat_id,
+        message.message_id,
+        file_name,
+    )
+
+    bot_info = await context.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start=file_{file_key}"
+
+    await message.reply_text(
+        "✅ فایل با موفقیت ثبت شد.\n\n"
+        f"📁 نام فایل: {file_name}\n"
+        f"🔗 لینک اختصاصی:\n{link}"
+    )
+
+
+# ---------------- ADMIN STATS ----------------
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not user or not is_admin(user.id):
         return
 
-    save_user(user)
+    with db_connect() as db:
+        users_count = db.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
 
-    message = update.effective_message
-    media = get_media(message)
+        files_count = db.execute(
+            "SELECT COUNT(*) FROM files"
+        ).fetchone()[0]
 
-    if not media:
+        active_count = db.execute(
+            "SELECT COUNT(*) FROM files WHERE active = 1"
+        ).fetchone()[0]
+
+    await update.message.reply_text(
+        "📊 آمار ربات\n\n"
+        f"👥 تعداد کاربران ثبت‌شده: {users_count}\n"
+        f"📁 تعداد کل فایل‌ها: {files_count}\n"
+        f"🟢 لینک‌های فعال: {active_count}"
+    )
+
+
+# ---------------- ADMIN FILE LIST ----------------
+
+async def files_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
         return
 
-    file_type, file_id, file_name, file_size = media
-    caption = message.caption or ""
+    files = get_all_files()
 
-    file_key = secrets.token_urlsafe(12).replace("-", "").replace("_", "")[:13]
+    if not files:
+        await update.message.reply_text("هنوز فایلی ثبت نشده است.")
+        return
 
-    try:
+    for file_key, file_name, active in files:
+        status = "🟢 فعال" if active else "🔴 غیرفعال"
 
-        save_file(
-            file_key,
-            user.id,
-            file_id,
-            file_type,
-            file_name,
-            caption,
-            file_size
-        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔴 غیرفعال کردن" if active else "🟢 فعال کردن",
+                    callback_data=f"toggle:{file_key}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 حذف لینک",
+                    callback_data=f"delete:{file_key}",
+                )
+            ],
+        ])
 
         bot_info = await context.bot.get_me()
-
         link = (
             f"https://t.me/{bot_info.username}"
             f"?start=file_{file_key}"
         )
 
-        await message.reply_text(
-            "✅ فایل با موفقیت ثبت شد.\n\n"
-            f"نام فایل: {file_name}\n"
-            f"نوع فایل: {file_type}\n\n"
-            "🔗 لینک اختصاصی:\n"
-            f"{link}\n\n"
-            "برای دریافت فایل، کاربران باید عضو "
-            "@MAN_O_2_NEWS باشند."
-        )
-
-    except Exception:
-
-        logger.exception("File upload failed")
-
-        await message.reply_text(
-            "ثبت فایل با خطا مواجه شد."
+        await update.message.reply_text(
+            f"📁 فایل: {file_name}\n"
+            f"🔑 شناسه: {file_key}\n"
+            f"وضعیت: {status}\n\n"
+            f"🔗 {link}",
+            reply_markup=keyboard,
         )
 
 
-# ==================================================
-# دکمه بررسی عضویت
-# ==================================================
+# ---------------- ADMIN FILE CONTROLS ----------------
 
-async def membership_check_button(
+async def file_control(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
+    user_id = query.from_user.id
 
-    if not query or not query.data:
-        return
-
-    if not query.data.startswith("getfile:"):
-        await query.answer()
-        return
-
-    file_key = query.data.split(":", 1)[1]
-    row = find_file(file_key)
-
-    if row is None or not row["enabled"]:
-
-        await query.answer(
-            "این لینک معتبر نیست یا فایل غیرفعال شده است.",
-            show_alert=True
-        )
-
-        return
-
-    if not is_admin(query.from_user.id):
-
-        membership = await check_required_membership(
-            context,
-            query.from_user.id
-        )
-
-        if membership is False:
-
-            await query.answer(
-                "هنوز عضو کانال نشده‌ای.",
-                show_alert=True
-            )
-
-            return
-
-        if membership is None:
-
-            await query.answer(
-                "بررسی عضویت ناموفق بود. کمی بعد دوباره تلاش کن.",
-                show_alert=True
-            )
-
-            return
-
-    await query.answer()
-
-    try:
-
-        await query.edit_message_text(
-            "✅ عضویت تأیید شد؛ فایل در پیام بعدی ارسال می‌شود."
-        )
-
-        await send_file_to_user(
-            query.message.chat_id,
-            row,
-            context
-        )
-
-        count_download(file_key)
-
-    except Exception:
-
-        logger.exception(
-            "File delivery after membership check failed: key=%s",
-            file_key
-        )
-
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text="ارسال فایل با خطا مواجه شد. دوباره تلاش کن."
-        )
-
-
-# ==================================================
-# پنل مدیریت
-# ==================================================
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📊 آمار ربات",
-                callback_data="admin:stats"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🗂 فایل‌های اخیر",
-                callback_data="admin:files"
-            )
-        ],
-    ]
-
-    await update.message.reply_text(
-        "پنل مدیریت\n\n"
-        "دستورهای مدیریتی:\n"
-        "/stats - آمار کلی\n"
-        "/files - فایل‌های اخیر\n"
-        "/disable KEY - غیرفعال‌کردن لینک\n"
-        "/enable KEY - فعال‌کردن لینک\n"
-        "/delete_file KEY - حذف فایل",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    users, total, active, downloads = get_stats()
-
-    await update.message.reply_text(
-        "📊 آمار ربات\n\n"
-        f"کاربران ثبت‌شده: {users}\n"
-        f"کل فایل‌ها: {total}\n"
-        f"لینک‌های فعال: {active}\n"
-        f"تعداد دریافت موفق: {downloads}"
-    )
-
-
-async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    rows = recent_files()
-
-    if not rows:
-        await update.message.reply_text(
-            "هنوز فایلی ثبت نشده است."
-        )
-        return
-
-    lines = ["🗂 فایل‌های اخیر"]
-
-    for row in rows:
-
-        status = "فعال" if row["enabled"] else "غیرفعال"
-
-        lines.append(
-            f"\nکلید: {row['file_key']}\n"
-            f"نام: {row['file_name'] or '-'}\n"
-            f"نوع: {row['file_type']}\n"
-            f"دریافت: {row['downloads']}\n"
-            f"وضعیت: {status}\n"
-            f"آپلودکننده: {row['owner_id']}"
-        )
-
-    await update.message.reply_text(
-        "\n".join(lines)
-    )
-
-
-async def file_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "کلید فایل را وارد کن. مثال: /disable ABC123"
-        )
-        return
-
-    command = (
-        update.message.text
-        .split()[0]
-        .split("@")[0]
-        .lower()
-    )
-
-    file_key = context.args[0].strip()
-
-    if command == "/disable":
-
-        ok = change_file_status(file_key, False)
-
-        result = (
-            "لینک غیرفعال شد."
-            if ok else
-            "فایلی با این کلید پیدا نشد."
-        )
-
-    elif command == "/enable":
-
-        ok = change_file_status(file_key, True)
-
-        result = (
-            "لینک فعال شد."
-            if ok else
-            "فایلی با این کلید پیدا نشد."
-        )
-
-    else:
-
-        ok = remove_file(file_key)
-
-        result = (
-            "فایل از دیتابیس حذف شد."
-            if ok else
-            "فایلی با این کلید پیدا نشد."
-        )
-
-    await update.message.reply_text(result)
-
-
-async def admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-
-    if not is_admin(query.from_user.id):
+    if not is_admin(user_id):
         await query.answer()
         return
 
     await query.answer()
 
-    if query.data == "admin:stats":
+    action, file_key = query.data.split(":", 1)
 
-        users, total, active, downloads = get_stats()
+    with db_connect() as db:
+        if action == "toggle":
+            row = db.execute(
+                "SELECT active FROM files WHERE file_key = ?",
+                (file_key,),
+            ).fetchone()
 
-        await query.edit_message_text(
-            "📊 آمار ربات\n\n"
-            f"کاربران ثبت‌شده: {users}\n"
-            f"کل فایل‌ها: {total}\n"
-            f"لینک‌های فعال: {active}\n"
-            f"تعداد دریافت موفق: {downloads}"
-        )
+            if not row:
+                await query.edit_message_text("فایل پیدا نشد.")
+                return
 
-    elif query.data == "admin:files":
+            new_status = 0 if row[0] else 1
 
-        rows = recent_files()
+            db.execute(
+                "UPDATE files SET active = ? WHERE file_key = ?",
+                (new_status, file_key),
+            )
 
-        if not rows:
             await query.edit_message_text(
-                "هنوز فایلی ثبت نشده است."
-            )
-            return
-
-        lines = ["🗂 فایل‌های اخیر"]
-
-        for row in rows:
-
-            status = "فعال" if row["enabled"] else "غیرفعال"
-
-            lines.append(
-                f"\n{row['file_key']} | "
-                f"{row['file_name'] or '-'}\n"
-                f"{row['file_type']} | "
-                f"دریافت: {row['downloads']} | {status}"
+                "✅ وضعیت لینک تغییر کرد."
             )
 
-        await query.edit_message_text(
-            "\n".join(lines)
-        )
+        elif action == "delete":
+            db.execute(
+                "DELETE FROM files WHERE file_key = ?",
+                (file_key,),
+            )
+
+            await query.edit_message_text(
+                "🗑 لینک فایل حذف شد."
+            )
 
 
-# ==================================================
-# مدیریت خطا
-# ==================================================
+# ---------------- ERROR HANDLER ----------------
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     logger.error(
-        "Unhandled exception while processing update",
-        exc_info=context.error
+        "Unhandled exception:",
+        exc_info=context.error,
     )
 
 
-# ==================================================
-# اجرای ربات
-# ==================================================
+# ---------------- MAIN ----------------
 
 def main():
-
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN در فایل .env تنظیم نشده است."
@@ -858,74 +497,37 @@ def main():
 
     init_db()
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("files", files_command))
 
     app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        CommandHandler("admin", admin_panel)
-    )
-
-    app.add_handler(
-        CommandHandler("stats", stats_command)
-    )
-
-    app.add_handler(
-        CommandHandler("files", files_command)
-    )
-
-    app.add_handler(
-        CommandHandler(
-            ["disable", "enable", "delete_file"],
-            file_admin_action
+        CallbackQueryHandler(
+            check_callback,
+            pattern=r"^check:",
         )
     )
 
     app.add_handler(
         CallbackQueryHandler(
-            membership_check_button,
-            pattern=r"^getfile:"
+            file_control,
+            pattern=r"^(toggle|delete):",
         )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            admin_button,
-            pattern=r"^admin:"
-        )
-    )
-
-    media_filter = (
-        filters.Document.ALL
-        | filters.PHOTO
-        | filters.VIDEO
-        | filters.AUDIO
-        | filters.VOICE
-        | filters.ANIMATION
-        | filters.VIDEO_NOTE
-        | filters.Sticker.ALL
     )
 
     app.add_handler(
         MessageHandler(
-            media_filter & ~filters.COMMAND,
-            upload_file
+            filters.ALL & ~filters.COMMAND,
+            handle_upload,
         )
     )
 
     app.add_error_handler(error_handler)
 
-    logger.info("File uploader bot is starting...")
-
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    logger.info("Bot is starting...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
